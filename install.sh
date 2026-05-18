@@ -89,10 +89,6 @@ backup_existing() {
 }
 
 ensure_path() {
-  if echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
-    return
-  fi
-
   local rc_file=""
   case "${SHELL:-/bin/bash}" in
     */zsh)  rc_file="$HOME/.zshrc" ;;
@@ -102,15 +98,18 @@ ensure_path() {
 
   local path_line='export PATH="$HOME/.smux/bin:$PATH"'
 
-  if [[ -f "$rc_file" ]] && grep -qF '.smux/bin' "$rc_file"; then
-    return
+  # Write to rc file if not already present
+  if [[ -f "$rc_file" ]] && ! grep -qF '.smux/bin' "$rc_file"; then
+    info "Adding ~/.smux/bin to PATH in $rc_file"
+    echo "" >> "$rc_file"
+    echo "# smux" >> "$rc_file"
+    echo "$path_line" >> "$rc_file"
   fi
 
-  info "Adding ~/.smux/bin to PATH in $rc_file"
-  echo "" >> "$rc_file"
-  echo "# smux" >> "$rc_file"
-  echo "$path_line" >> "$rc_file"
-  export PATH="$BIN_DIR:$PATH"
+  # Export into current shell if not already in PATH
+  if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
+    export PATH="$BIN_DIR:$PATH"
+  fi
 }
 
 download() {
