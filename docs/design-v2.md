@@ -209,34 +209,12 @@ Result:
 
 ---
 
-## 5. Roadmap
+## 5. File Changes (v2.0)
 
-### v2.0
-
-- `.smux` DSL (`|` + `,`)
-- Quote-aware parser (with quote stripping, `\"` `\\` escape)
-- `smux start / stop / attach / status`
-- Auto-labeling (`@smux_label`)
-- `-n` / `-d` / `--replace` / `--dry-run` / `--preview`
-- `--dry-run` structured output + `--preview` Unicode layout preview
-- `#` comments and blank lines
-- Session safety (refuse non-smux sessions)
-- Correct pane creation order (column-first, target previous column top)
-
-### v2.1
-
-- Size constraints (`cmd:40%`)
-
-### Deferred
-
-Multi-line syntax, nested layouts, config include, watch/restart — keep it thin.
-
----
-
-## 6. File Changes
-
-| File | Change | Added |
-|------|--------|-------|
-| `install.sh` | Add 4 commands + quote-aware parser + layout preview renderer | ~180 lines |
-| `scripts/tmux-bridge` | No changes | 0 |
-| `skills/smux/SKILL.md` | No changes | 0 |
+| File | Change |
+|------|--------|
+| `install.sh` | `smux start / stop / attach / status` + quote-aware parser + layout preview |
+| `scripts/tmux-bridge` | No changes |
+| `skills/smux/SKILL.md` | No changes |
+| `README.md` | Quick Start + Workspace Commands chapter |
+| `docs/design-v2.md` | This document |
