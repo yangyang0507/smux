@@ -21,12 +21,9 @@ tmux-bridge keys codex Enter
 ```bash
 # Install
 curl -fsSL https://raw.githubusercontent.com/yangyang0507/smux/main/install.sh | bash
-export PATH="$HOME/.smux/bin:$PATH"
 
-# Define a workspace in your project
-cat > .smux <<'EOF'
-cmd | writer codex, tester npm test | reviewer claude
-EOF
+# Create a workspace layout in your project
+smux init 'cmd | writer codex, tester npm test | reviewer claude'
 
 # Launch
 smux start --preview    # preview the layout
@@ -41,6 +38,28 @@ This installs:
 - **smux CLI** for workspace lifecycle management
 
 Everything lives in `~/.smux/`.
+
+## Update
+
+```bash
+smux update
+```
+
+## Uninstall
+
+```bash
+smux uninstall
+```
+
+## AI Agent Skills
+
+Install the smux skill to teach your agents how to use tmux-bridge:
+
+```bash
+npx skills add yangyang0507/smux
+```
+
+Works with Claude Code, Codex, Cursor, Copilot, and [40+ other agents](https://skills.sh).
 
 ## Keybindings
 
@@ -73,6 +92,14 @@ All keybindings use **Option (Alt)** with no prefix required.
 | `i/k` | Scroll up/down |
 | `Shift+I/K` | Half-page up/down |
 | `q` or `Escape` | Exit scroll mode |
+
+### Copy & Paste
+
+| Operation | How |
+|-----------|-----|
+| Copy (mouse) | Drag to select text — auto-copies to clipboard |
+| Copy (keyboard) | `Option+Tab` → `v` to select → `y` to copy |
+| Paste | `Option+v` |
 
 ### Mouse
 
@@ -129,28 +156,6 @@ smux doctor
 
 cmd | writer codex, tester "npm test | grep skip" | reviewer claude
 ```
-
-## Update
-
-```bash
-smux update
-```
-
-## Uninstall
-
-```bash
-smux uninstall
-```
-
-## AI Agent Skills
-
-Install the smux skill to teach your agents how to use tmux-bridge:
-
-```bash
-npx skills add yangyang0507/smux
-```
-
-Works with Claude Code, Codex, Cursor, Copilot, and [40+ other agents](https://skills.sh).
 
 ## Requirements
 
