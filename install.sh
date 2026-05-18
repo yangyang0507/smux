@@ -550,15 +550,20 @@ cmd_update() {
   download "$BASE_URL/scripts/tmux-bridge" "$BIN_DIR/tmux-bridge"
   chmod +x "$BIN_DIR/tmux-bridge"
 
+  # Download to a temp file to avoid overwriting the running script.
+  # If we overwrite $BIN_DIR/smux in-place while bash is executing it,
+  # bash may seek into the new file and execute heredoc content as commands.
   info "Updating smux CLI..."
-  download "$BASE_URL/install.sh" "$BIN_DIR/smux"
-  chmod +x "$BIN_DIR/smux"
+  download "$BASE_URL/install.sh" "$BIN_DIR/smux.new"
+  chmod +x "$BIN_DIR/smux.new"
+  mv "$BIN_DIR/smux.new" "$BIN_DIR/smux"
 
   if tmux list-sessions &>/dev/null; then
     tmux source-file "$SMUX_DIR/tmux.conf" 2>/dev/null && info "Reloaded tmux config." || true
   fi
 
-  printf "${GREEN}${BOLD}smux updated to v${VERSION}!${NC}\n"
+  info "Update complete. Restarting..."
+  exec "$BIN_DIR/smux" version
 }
 
 cmd_uninstall() {
