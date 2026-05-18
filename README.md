@@ -5,25 +5,38 @@ One-command tmux setup with terminal automation for AI agents.
 - **For you** — keyboard-driven tmux config with Option-key bindings, mouse support, and pane labels
 - **For agents** — `tmux-bridge` CLI lets any agent read, type, and send keys to any pane
 - **Agent-to-agent** — Claude Code can prompt Codex in the next pane, and Codex replies back. Any agent that can run bash can participate.
+- **Declarative workspace** — define pane layout + startup commands in `.smux`, launch with one command
 
 ```bash
-tmux-bridge read codex 20          # read the pane
-tmux-bridge type codex "review src/auth.ts"  # type into it
-tmux-bridge keys codex Enter       # press enter
+tmux-bridge read codex 20
+tmux-bridge message codex 'review src/auth.ts'
+tmux-bridge read codex 20          # verify text landed
+tmux-bridge keys codex Enter
 ```
 
-https://github.com/user-attachments/assets/9d5463ba-5972-4bbd-a07e-b585f1178011
-
-## Install
+## Quick Start
 
 ```bash
-curl -fsSL https://shawnpana.com/smux/install.sh | bash
+# Install
+curl -fsSL https://raw.githubusercontent.com/yangyang0507/smux/main/install.sh | bash
+export PATH="$HOME/.smux/bin:$PATH"
+
+# Define a workspace in your project
+cat > .smux <<'EOF'
+cmd | writer codex, tester npm test | reviewer claude
+EOF
+
+# Launch
+smux start --preview    # preview the layout
+smux start              # create the tmux session
+smux stop               # stop it
 ```
 
 This installs:
 - **tmux** if not already installed (via Homebrew, apt, dnf, pacman, or apk)
 - **tmux.conf** with Option-key bindings, mouse support, pane labels, and a minimal status bar
 - **tmux-bridge** CLI for cross-pane agent communication
+- **smux CLI** for workspace lifecycle management
 
 Everything lives in `~/.smux/`.
 
@@ -74,12 +87,41 @@ A CLI for cross-pane communication. Any tool that can run bash can use it — Cl
 | `tmux-bridge list` | Show all panes with target, process, label |
 | `tmux-bridge read <target> [lines]` | Read last N lines from a pane |
 | `tmux-bridge type <target> <text>` | Type text into a pane (no Enter) |
+| `tmux-bridge message <target> <text>` | Type a labeled cross-pane message (no Enter) |
 | `tmux-bridge keys <target> <key>...` | Send keys (Enter, Escape, C-c, etc.) |
 | `tmux-bridge name <target> <label>` | Label a pane for easy addressing |
 | `tmux-bridge resolve <label>` | Look up a pane by label |
 | `tmux-bridge id` | Print this pane's ID |
 
 See the [smux skill](skills/smux/SKILL.md) for full documentation on agent-to-agent workflows.
+
+## Workspace Commands
+
+```bash
+smux start [-n <name>] [-d] [--replace] [--dry-run] [--preview]
+smux stop  [-n <name>]
+smux attach [-n <name>]
+smux status
+```
+
+| Command | Description |
+|---|---|
+| `smux start` | Create a tmux session from `.smux` layout |
+| `smux start --dry-run` | Print the parsed session/pane plan without creating anything |
+| `smux start --preview` | Show the layout without creating anything |
+| `smux start -d` | Start detached (CI / remote / agent loop) |
+| `smux start --replace` | Replace an existing smux-managed session |
+| `smux stop` | Kill the smux-managed session |
+| `smux attach` | Re-attach to the session |
+| `smux status` | List all smux-managed sessions |
+
+`.smux` syntax:
+```
+# | split columns     , stack within column
+# Each cell: LABEL COMMAND (or just LABEL for empty shell pane)
+
+cmd | writer codex, tester "npm test | grep skip" | reviewer claude
+```
 
 ## Update
 
@@ -98,7 +140,7 @@ smux uninstall
 Install the smux skill to teach your agents how to use tmux-bridge:
 
 ```bash
-npx skills add ShawnPana/smux
+npx skills add yangyang0507/smux
 ```
 
 Works with Claude Code, Codex, Cursor, Copilot, and [40+ other agents](https://skills.sh).

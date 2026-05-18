@@ -39,7 +39,7 @@ The CLI **enforces** read-before-act. You cannot `type` or `keys` to a pane unle
 This enforces the **read-act-read** cycle at the CLI level. If you skip the read, the command fails:
 
 ```
-$ tmux-bridge type codex "hello"
+$ tmux-bridge type codex 'hello'
 error: must read the pane before interacting. Run: tmux-bridge read codex
 ```
 
@@ -60,12 +60,28 @@ error: must read the pane before interacting. Run: tmux-bridge read codex
 - Tasks that don't involve other tmux panes
 - You need raw tmux commands → use the `tmux` skill directly
 
+## Quote Convention
+
+**Always wrap message/type text in single quotes `'...'`.** Single quotes prevent shell expansion of `$`, `!`, and other special characters.
+
+```
+tmux-bridge message codex 'Please review src/auth.ts'   # correct
+tmux-bridge type codex 'hello'                           # correct
+```
+
+**If your message contains a single quote (`'`), escape it:**
+
+```
+tmux-bridge message codex 'I can'\''t do that right now'
+```
+
 ## Command Reference
 
 | Command | Description | Example |
 |---|---|---|
 | `tmux-bridge list` | Show all panes with target, pid, command, size, label | `tmux-bridge list` |
-| `tmux-bridge type <target> <text>` | Type text without pressing Enter | `tmux-bridge type codex "hello"` |
+| `tmux-bridge type <target> <text>` | Type text without pressing Enter | `tmux-bridge type codex 'hello'` |
+| `tmux-bridge message <target> <text>` | Type text with auto sender info and reply target | `tmux-bridge message codex 'review src/auth.ts'` |
 | `tmux-bridge read <target> [lines]` | Read last N lines (default 50) | `tmux-bridge read codex 100` |
 | `tmux-bridge keys <target> <key>...` | Send special keys | `tmux-bridge keys codex Enter` |
 | `tmux-bridge name <target> <label>` | Label a pane (visible in tmux border) | `tmux-bridge name %3 codex` |
@@ -78,27 +94,36 @@ Targets can be:
 - **tmux native**: `session:window.pane` (e.g. `shared:0.1`), pane ID (`%3`), or window index (`0`)
 - **label**: Any string set via `tmux-bridge name` — resolved automatically
 
-This means `tmux-bridge type codex "hello"` works directly if the pane was labeled `codex`.
+This means `tmux-bridge type codex 'hello'` works directly if the pane was labeled `codex`.
 
 ## Messaging Convention
 
-The CLI is **format-agnostic** — it types exactly what you give it. The recommended convention for agent-to-agent messages is to frame them yourself:
+The `message` command auto-prepends sender identity and location to every message:
 
 ```
-[tmux-bridge from:claude] Please review src/auth.ts
+[tmux-bridge from:claude pane:%4 at:shared:0.0] Please review src/auth.ts
 ```
 
-You type this framing as part of your message text. This lets the receiving agent know who sent it and how to reply.
+The receiver sees: who sent it (`from`), the exact pane to reply to (`pane`), and the session/window location (`at`).
+
+When you see this header in your pane, reply to the **pane** from the header using `tmux-bridge message`:
+
+```bash
+tmux-bridge read %4 20
+tmux-bridge message %4 '87% line coverage. Missing the OAuth refresh token path (lines 142-168).'
+tmux-bridge read %4 20
+tmux-bridge keys %4 Enter
+```
 
 ### Receiving messages — IMPORTANT
 
-**When you see a message prefixed with `[tmux-bridge from:<sender>]`, you MUST reply using tmux-bridge:**
+**When you see a message prefixed with `[tmux-bridge from:<sender> pane:<id> at:<location>]`, you MUST reply using tmux-bridge:**
 
 ```bash
-tmux-bridge read <sender> 20
-tmux-bridge type <sender> "[tmux-bridge from:myname] your response here"
-tmux-bridge read <sender> 20
-tmux-bridge keys <sender> Enter
+tmux-bridge read <pane-id-from-header> 20
+tmux-bridge message <pane-id-from-header> 'your response here'
+tmux-bridge read <pane-id-from-header> 20
+tmux-bridge keys <pane-id-from-header> Enter
 ```
 
 This sends your reply directly into the sender's pane so they see it immediately. **Do not just respond in your own pane** — the sender won't see it unless you send it back via tmux-bridge.
@@ -110,8 +135,8 @@ Keep replies concise (1-3 sentences). They will be typed into the sender's termi
 **Agent A (claude) sends:**
 ```bash
 tmux-bridge read codex 20       # 1. READ — satisfy read guard
-tmux-bridge type codex '[tmux-bridge from:claude] What is the test coverage for src/auth.ts?'
-                                 # 2. TYPE — text appears, no Enter yet
+tmux-bridge message codex 'What is the test coverage for src/auth.ts?'
+                                 # 2. MESSAGE — auto-prepends [tmux-bridge from:claude...]
 tmux-bridge read codex 20       # 3. READ — verify text landed
 tmux-bridge keys codex Enter    # 4. KEYS — press Enter to submit
 # Done. Do NOT wait, poll, or read codex for the response.
@@ -120,16 +145,16 @@ tmux-bridge keys codex Enter    # 4. KEYS — press Enter to submit
 
 **Agent B (codex) sees in their prompt:**
 ```
-[tmux-bridge from:claude] What is the test coverage for src/auth.ts?
+[tmux-bridge from:claude pane:%4 at:shared:0.0] What is the test coverage for src/auth.ts?
 ```
 
 **Agent B replies:**
 ```bash
-tmux-bridge read claude 20      # 1. READ — satisfy read guard
-tmux-bridge type claude '[tmux-bridge from:codex] src/auth.ts has 87% line coverage. Missing coverage on the OAuth refresh token path (lines 142-168).'
-                                 # 2. TYPE — text appears, no Enter yet
-tmux-bridge read claude 20      # 3. READ — verify text landed
-tmux-bridge keys claude Enter   # 4. KEYS — press Enter to submit
+tmux-bridge read %4 20          # 1. READ — satisfy read guard (use pane from header)
+tmux-bridge message %4 'src/auth.ts has 87% line coverage. Missing coverage on the OAuth refresh token path (lines 142-168).'
+                                 # 2. MESSAGE — auto-prepends [tmux-bridge from:codex...]
+tmux-bridge read %4 20          # 3. READ — verify text landed
+tmux-bridge keys %4 Enter       # 4. KEYS — press Enter to submit
 # Done. The reply appears in Agent A's pane automatically.
 ```
 
@@ -140,10 +165,10 @@ Every interaction with another pane MUST follow the **read → act → read** cy
 The full cycle for sending a message:
 
 1. **Read** the target pane (satisfies read guard)
-2. **Type** your message text (clears read mark)
+2. **Message** or **Type** your text (clears read mark)
 3. **Read** again (verify text landed, re-satisfy read guard)
 4. **Keys** Enter (submit the message, clears read mark)
-5. **Read** again if you need to see the result (non-agent panes)
+5. **Read** again if you need to see the result (non-agent panes only)
 
 ### Example: sending a message to an agent
 
@@ -151,8 +176,8 @@ The full cycle for sending a message:
 # 1. READ — check the pane and satisfy read guard
 tmux-bridge read codex 20
 
-# 2. TYPE — type the message (no Enter)
-tmux-bridge type codex '[tmux-bridge from:claude] Please review the changes in src/auth.ts'
+# 2. MESSAGE — type the message with auto sender info (no Enter)
+tmux-bridge message codex 'Please review the changes in src/auth.ts'
 
 # 3. READ — verify the text landed correctly
 tmux-bridge read codex 20
@@ -171,7 +196,7 @@ tmux-bridge keys codex Enter
 tmux-bridge read worker 10
 
 # 2. TYPE — type the answer
-tmux-bridge type worker "y"
+tmux-bridge type worker 'y'
 
 # 3. READ — verify it landed
 tmux-bridge read worker 10
@@ -197,11 +222,11 @@ tmux-bridge name "$(tmux-bridge id)" claude
 tmux-bridge list
 ```
 
-### Step 3: Read, type, read, Enter
+### Step 3: Read, message, read, Enter
 
 ```bash
 tmux-bridge read codex 20
-tmux-bridge type codex '[tmux-bridge from:claude] Please review the changes in src/auth.ts and suggest improvements'
+tmux-bridge message codex 'Please review the changes in src/auth.ts and suggest improvements'
 tmux-bridge read codex 20
 tmux-bridge keys codex Enter
 # Done. Wait for the reply to appear in your pane.
@@ -210,10 +235,11 @@ tmux-bridge keys codex Enter
 ## Tips
 
 - **Read guard is enforced** — you MUST read before every `type`/`keys`. The CLI will error otherwise.
-- **Every action clears the read mark** — after `type`, you must `read` again before `keys`.
+- **Every action clears the read mark** — after `type`/`message`, you must `read` again before `keys`.
 - **Never wait or poll** — agent panes reply to you via tmux-bridge. The response appears in YOUR pane.
 - **Label panes early** — it makes cross-agent communication much easier than using `%N` IDs
 - **`type` uses literal mode** — it uses `-l` so special characters are typed as-is
+- **`message` auto-prepends sender info** — preferred over `type` for agent-to-agent communication
 - **`read` defaults to 50 lines** — pass a higher number for more context
 - **Non-agent panes** (shells, processes) are the exception — you DO need to read them to see output
-- **Frame messages yourself** — use the `[tmux-bridge from:yourname]` convention when messaging other agents
+- **Wrap text in single quotes** — `'...'` prevents shell expansion of `$` and `!`

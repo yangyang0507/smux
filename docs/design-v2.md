@@ -240,5 +240,3 @@ Multi-line syntax, nested layouts, config include, watch/restart — keep it thi
 | `install.sh` | Add 4 commands + quote-aware parser + layout preview renderer | ~180 lines |
 | `scripts/tmux-bridge` | No changes | 0 |
 | `skills/smux/SKILL.md` | No changes | 0 |
-
-**v2.0 total project size: under 1000 lines.**

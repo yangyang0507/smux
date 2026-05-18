@@ -2,8 +2,8 @@
 # smux — one-command tmux setup
 set -euo pipefail
 
-VERSION="1.0.0"
-REPO="ShawnPana/smux"
+VERSION="2.0.0"
+REPO="yangyang0507/smux"
 BRANCH="main"
 BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 SMUX_DIR="$HOME/.smux"
@@ -124,7 +124,325 @@ download() {
   fi
 }
 
-# --- Commands ---
+# ================================================================
+# smux v2 — declarative pane layout and lifecycle management
+# ================================================================
+
+# --- Text utilities ---
+
+trim() {
+  printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+repeat_char() {
+  local ch="$1" n="$2" out=""
+  while (( n-- > 0 )); do out="${out}${ch}"; done
+  printf '%s' "$out"
+}
+
+valid_name() {
+  [[ "$1" =~ ^[A-Za-z0-9_.-]+$ ]]
+}
+
+find_project_root() {
+  local dir="$PWD"
+  while :; do
+    if [[ -f "$dir/.smux" ]]; then
+      # Allow $HOME/.smux only when running from $HOME itself (explicit workspace).
+      # When running from a subdirectory, walking up to $HOME is an implicit fallback — reject.
+      if [[ "$dir" == "$HOME" && "$PWD" != "$HOME" ]]; then
+        error "Refusing to use ~/.smux as an implicit fallback from $PWD. Run from ~ to use it as a workspace, or create .smux in this project."
+      fi
+      echo "$dir"
+      return
+    fi
+    [[ "$dir" == "/" ]] && error "No .smux found from $PWD upward."
+    dir=$(dirname "$dir")
+  done
+}
+
+session_name_for() {
+  local project="$1" name="${2:-}"
+  [[ -n "$name" ]] || name=$(basename "$project")
+  valid_name "$name" || error "Invalid session name '$name'. Use -n with [A-Za-z0-9_.-]+."
+  echo "$name"
+}
+
+session_project() {
+  tmux show-options -t "$1" -qv @smux_project 2>/dev/null || true
+}
+
+require_smux_session() {
+  local session="$1" project
+  tmux has-session -t "$session" 2>/dev/null || error "No tmux session named '$session'."
+  project=$(session_project "$session")
+  [[ -n "$project" ]] || error "Session '$session' is not managed by smux; refusing."
+}
+
+layout_line() {
+  local file="$1" line clean found=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    clean=$(trim "$line")
+    [[ -z "$clean" || "${clean:0:1}" == "#" ]] && continue
+    [[ -z "$found" ]] || error ".smux must contain exactly one layout line."
+    found="$clean"
+  done < "$file"
+  [[ -n "$found" ]] || error ".smux has no layout line."
+  echo "$found"
+}
+
+# Quote-aware string splitter.
+# Splits $1 by delimiter $2, but ignores delimiters inside double-quoted regions.
+# Each segment is printed on its own line (suitable for 'while read' consumption).
+# Returns 2 if quotes are unbalanced.
+split_aware() {
+  local s="$1" delim="$2" inq=0 esc=0 buf="" ch i
+  for (( i=0; i<${#s}; i++ )); do
+    ch="${s:i:1}"
+    if (( esc )); then buf="${buf}${ch}"; esc=0; continue; fi
+    if [[ "$ch" == "\\" && $inq -eq 1 ]]; then buf="${buf}${ch}"; esc=1; continue; fi
+    if [[ "$ch" == '"' ]]; then
+      (( inq = 1 - inq ))
+      buf="${buf}${ch}"
+      continue
+    fi
+    if [[ "$ch" == "$delim" && $inq -eq 0 ]]; then
+      printf '%s\n' "$buf"
+      buf=""
+    else
+      buf="${buf}${ch}"
+    fi
+  done
+  (( inq == 0 )) || return 2
+  printf '%s\n' "$buf"
+}
+
+quote_balanced() {
+  local s="$1" inq=0 esc=0 ch i
+  for (( i=0; i<${#s}; i++ )); do
+    ch="${s:i:1}"
+    if (( esc )); then esc=0; continue; fi
+    if [[ "$ch" == "\\" && $inq -eq 1 ]]; then esc=1; continue; fi
+    [[ "$ch" == '"' ]] && (( inq = 1 - inq ))
+  done
+  (( inq == 0 ))
+}
+
+unquote_command() {
+  local s
+  s=$(trim "$1")
+  if [[ "${s:0:1}" == '"' && "${s:${#s}-1:1}" == '"' ]]; then
+    s="${s:1:${#s}-2}"
+    s="${s//\\\\/\\}"
+    s="${s//\\\"/\"}"
+  fi
+  printf '%s' "$s"
+}
+
+# --- Parser state: populated by parse_layout(), consumed by start_layout() and preview ---
+# Arrays are indexed by global pane index (0..PANE_COUNT-1).
+# COL_START[c] = first pane index in column c; COL_COUNT[c] = number of panes in column c.
+PANE_LABELS=()
+PANE_COMMANDS=()
+PANE_COLS=()
+COL_START=()
+COL_COUNT=()
+COL_WIDTH=()
+PANE_COUNT=0
+COL_COUNT_TOTAL=0
+
+# Parse a .smux layout line into the global pane/column arrays.
+# Splits by '|' to get columns, then by ',' to get panes within each column.
+# Each cell: LABEL [COMMAND].  Label is the first [A-Za-z0-9_.-]+ word;
+# everything after is the command (may be empty = shell pane).
+parse_layout() {
+  local line="$1" col cell label cmd rest col_start col_count
+  quote_balanced "$line" || error "Unclosed quote in .smux layout."
+  PANE_LABELS=(); PANE_COMMANDS=(); PANE_COLS=(); COL_START=(); COL_COUNT=()
+  PANE_COUNT=0; COL_COUNT_TOTAL=0
+  while IFS= read -r col; do
+    col=$(trim "$col")
+    [[ -n "$col" ]] || error "Empty column in .smux layout."
+    col_start=$PANE_COUNT
+    col_count=0
+    while IFS= read -r cell; do
+      cell=$(trim "$cell")
+      [[ -n "$cell" ]] || error "Empty pane in .smux layout."
+      label="${cell%%[[:space:]]*}"
+      rest="${cell#"$label"}"
+      cmd=$(unquote_command "$rest")
+      valid_name "$label" || error "Invalid label '$label'. Use [A-Za-z0-9_.-]+."
+      PANE_LABELS[$PANE_COUNT]="$label"
+      PANE_COMMANDS[$PANE_COUNT]="$cmd"
+      PANE_COLS[$PANE_COUNT]="$COL_COUNT_TOTAL"
+      (( PANE_COUNT += 1, col_count += 1 ))
+    done < <(split_aware "$col" ",")
+    COL_START[$COL_COUNT_TOTAL]="$col_start"
+    COL_COUNT[$COL_COUNT_TOTAL]="$col_count"
+    (( COL_COUNT_TOTAL += 1 ))
+  done < <(split_aware "$line" "|")
+}
+
+display_cmd() {
+  local cmd="$1" sh
+  if [[ -n "$cmd" ]]; then
+    echo "$cmd"
+  else
+    sh="${SHELL##*/}"
+    [[ -n "$sh" ]] || sh="shell"
+    echo "($sh)"
+  fi
+}
+
+print_plan() {
+  local session="$1" project="$2" i labelw=10 d
+  for (( i=0; i<PANE_COUNT; i++ )); do
+    ((${#PANE_LABELS[$i]} > labelw)) && labelw=${#PANE_LABELS[$i]}
+  done
+  echo "session: $session"
+  echo "project: $project"
+  echo "panes:"
+  for (( i=0; i<PANE_COUNT; i++ )); do
+    d=$(display_cmd "${PANE_COMMANDS[$i]}")
+    printf "  %-*s  %s\n" "$labelw" "${PANE_LABELS[$i]}" "$d"
+  done
+}
+
+fit_text() {
+  local s="$1" w="$2" l pad left right
+  if (( ${#s} > w )); then s="${s:0:$((w-1))}…"; fi
+  l=${#s}; pad=$((w-l)); left=$((pad/2)); right=$((pad-left))
+  printf '%s%s%s' "$(repeat_char ' ' "$left")" "$s" "$(repeat_char ' ' "$right")"
+}
+
+preview_line_for() {
+  local col="$1" row="$2" height="$3" width="$4" n start mid p off idx text=""
+  n="${COL_COUNT[$col]}"; start="${COL_START[$col]}"
+  if (( n == 1 )); then
+    mid=$((height/2))
+    (( row == mid-1 )) && text="${PANE_LABELS[$start]}"
+    (( row == mid )) && text=$(display_cmd "${PANE_COMMANDS[$start]}")
+  else
+    for (( p=0; p<n; p++ )); do
+      off=$((p*3)); idx=$((start+p))
+      (( row == off )) && text="${PANE_LABELS[$idx]}"
+      (( row == off+1 )) && text=$(display_cmd "${PANE_COMMANDS[$idx]}")
+      if (( p < n-1 && row == off+2 )); then
+        repeat_char "─" "$width"
+        return
+      fi
+    done
+  fi
+  fit_text "$text" "$width"
+}
+
+print_preview() {
+  local c i width max_rows=0 row
+  for (( c=0; c<COL_COUNT_TOTAL; c++ )); do
+    width=10
+    for (( i=0; i<COL_COUNT[$c]; i++ )); do
+      local idx=$((COL_START[$c]+i)) d
+      d=$(display_cmd "${PANE_COMMANDS[$idx]}")
+      ((${#PANE_LABELS[$idx]}+2 > width)) && width=$((${#PANE_LABELS[$idx]}+2))
+      ((${#d}+2 > width)) && width=$((${#d}+2))
+    done
+    (( width > 24 )) && width=24
+    COL_WIDTH[$c]="$width"
+    local rows=$((COL_COUNT[$c]*2 + COL_COUNT[$c] - 1))
+    (( rows > max_rows )) && max_rows=$rows
+  done
+  # --- Draw top border: ┌──┬──┬──┐ ---
+  printf '┌'
+  for (( c=0; c<COL_COUNT_TOTAL; c++ )); do
+    repeat_char "─" "${COL_WIDTH[$c]}"
+    (( c == COL_COUNT_TOTAL-1 )) && printf '┐' || printf '┬'
+  done
+  printf '\n'
+  # --- Draw rows ---
+  for (( row=0; row<max_rows; row++ )); do
+    printf '│'
+    for (( c=0; c<COL_COUNT_TOTAL; c++ )); do
+      preview_line_for "$c" "$row" "$max_rows" "${COL_WIDTH[$c]}"
+      printf '│'
+    done
+    printf '\n'
+  done
+  # --- Draw bottom border: └──┴──┴──┘ ---
+  printf '└'
+  for (( c=0; c<COL_COUNT_TOTAL; c++ )); do
+    repeat_char "─" "${COL_WIDTH[$c]}"
+    (( c == COL_COUNT_TOTAL-1 )) && printf '┘' || printf '┴'
+  done
+  printf '\n'
+}
+
+# Type a command into a pane (literal mode) and press Enter.
+# No-op if command is empty.
+send_command_to_pane() {
+  local pane="$1" cmd="$2"
+  [[ -n "$cmd" ]] || return 0
+  tmux send-keys -t "$pane" -l -- "$cmd"
+  tmux send-keys -t "$pane" Enter
+}
+
+# Create a tmux session from parsed layout data.
+# Column-first creation order:
+#   1. new-session (col 0)
+#   2. split-window -h for each additional column, target = previous column's top pane
+#   3. select-layout even-horizontal to equalize column widths
+#   4. split-window -v within each column, using percentages for roughly equal heights
+#   5. set @smux_label + @name on each pane, then send the startup command
+start_layout() {
+  local session="$1" project="$2" replace="$3" detached="$4" marker
+  # --- Duplicate / safety check ---
+  if tmux has-session -t "$session" 2>/dev/null; then
+    marker=$(session_project "$session")
+    [[ -n "$marker" ]] || error "Session '$session' exists and is not managed by smux."
+    (( replace )) || error "Session '$session' already exists. Use 'smux attach -n $session' or --replace."
+    tmux kill-session -t "$session"
+  fi
+  local pane col idx j k pct prev
+  PANE_IDS=(); COL_TOP=()
+  # --- Phase 1: create all columns horizontally ---
+  pane=$(tmux new-session -d -s "$session" -c "$project" -P -F '#{pane_id}')
+  PANE_IDS[0]="$pane"; COL_TOP[0]="$pane"
+  tmux set-option -t "$session" @smux_project "$project" >/dev/null
+  for (( col=1; col<COL_COUNT_TOTAL; col++ )); do
+    prev="${COL_TOP[$((col-1))]}"                              # target = previous column's top pane
+    pane=$(tmux split-window -h -t "$prev" -c "$project" -P -F '#{pane_id}')
+    idx="${COL_START[$col]}"
+    PANE_IDS[$idx]="$pane"
+    COL_TOP[$col]="$pane"
+  done
+  tmux select-layout -t "$session:0" even-horizontal >/dev/null 2>&1 || true
+  # --- Phase 2: stack panes vertically within each column ---
+  for (( col=0; col<COL_COUNT_TOTAL; col++ )); do
+    k="${COL_COUNT[$col]}"
+    prev="${COL_TOP[$col]}"
+    for (( j=1; j<k; j++ )); do
+      pct=$((100*(k-j)/(k-j+1)))                                # split remaining space proportionally
+      (( pct < 1 )) && pct=50
+      pane=$(tmux split-window -v -p "$pct" -t "$prev" -c "$project" -P -F '#{pane_id}')
+      idx=$((COL_START[$col]+j))
+      PANE_IDS[$idx]="$pane"
+      prev="$pane"
+    done
+  done
+  # --- Phase 3: label and launch ---
+  for (( idx=0; idx<PANE_COUNT; idx++ )); do
+    pane="${PANE_IDS[$idx]}"
+    tmux set-option -p -t "$pane" @smux_label "${PANE_LABELS[$idx]}" >/dev/null
+    tmux set-option -p -t "$pane" @name "${PANE_LABELS[$idx]}" >/dev/null
+    send_command_to_pane "$pane" "${PANE_COMMANDS[$idx]}"
+  done
+  (( detached )) || {
+    if [[ -n "${TMUX:-}" ]]; then tmux switch-client -t "$session"; else tmux attach -t "$session"; fi
+  }
+}
+
+# ================================================================
+# CLI command handlers
+# ================================================================
 
 cmd_install() {
   local os
@@ -249,6 +567,90 @@ cmd_uninstall() {
   echo "    export PATH=\"\$HOME/.smux/bin:\$PATH\""
 }
 
+cmd_start() {
+  local name="" detached=0 replace=0 dry_run=0 preview=0 project session line
+  while (($#)); do
+    case "$1" in
+      -n) [[ $# -ge 2 ]] || error "-n requires a session name."; name="$2"; shift 2 ;;
+      -d) detached=1; shift ;;
+      --replace) replace=1; shift ;;
+      --dry-run) dry_run=1; shift ;;
+      --preview) preview=1; dry_run=1; shift ;;
+      *) error "Unknown start option: $1" ;;
+    esac
+  done
+  command -v tmux >/dev/null 2>&1 || error "tmux not found."
+  project=$(find_project_root)
+  session=$(session_name_for "$project" "$name")
+  line=$(layout_line "$project/.smux")
+  parse_layout "$line"
+  if (( dry_run )); then
+    if (( preview )); then
+      echo "session: $session"
+      echo "project: $project"
+      echo ""
+      print_preview
+      echo ""
+      print_plan "$session" "$project" | sed '1,2d'
+    else
+      print_plan "$session" "$project"
+    fi
+    return
+  fi
+  start_layout "$session" "$project" "$replace" "$detached"
+}
+
+cmd_stop() {
+  local name="" project session
+  while (($#)); do
+    case "$1" in
+      -n) [[ $# -ge 2 ]] || error "-n requires a session name."; name="$2"; shift 2 ;;
+      *) error "Unknown stop option: $1" ;;
+    esac
+  done
+  if [[ -z "$name" ]]; then
+    project=$(find_project_root)
+    session=$(session_name_for "$project" "")
+  else
+    session=$(session_name_for "$PWD" "$name")
+  fi
+  require_smux_session "$session"
+  tmux kill-session -t "$session"
+  info "Stopped smux session '$session'."
+}
+
+cmd_attach() {
+  local name="" project session
+  while (($#)); do
+    case "$1" in
+      -n) [[ $# -ge 2 ]] || error "-n requires a session name."; name="$2"; shift 2 ;;
+      *) error "Unknown attach option: $1" ;;
+    esac
+  done
+  if [[ -z "$name" ]]; then
+    project=$(find_project_root)
+    session=$(session_name_for "$project" "")
+  else
+    session=$(session_name_for "$PWD" "$name")
+  fi
+  tmux has-session -t "$session" 2>/dev/null || error "No tmux session named '$session'."
+  if [[ -n "${TMUX:-}" ]]; then tmux switch-client -t "$session"; else tmux attach -t "$session"; fi
+}
+
+cmd_status() {
+  command -v tmux >/dev/null 2>&1 || error "tmux not found."
+  printf "%-12s %-28s %-7s %s\n" "SESSION" "PROJECT" "PANES" "LABELS"
+  { tmux list-sessions -F '#{session_name}|#{@smux_project}' 2>/dev/null || true; } |
+  while IFS='|' read -r session project; do
+    [[ -n "$project" ]] || continue
+    local panes labels short_project
+    panes=$(tmux list-panes -t "$session" -F '#{pane_id}' 2>/dev/null | wc -l | tr -d ' ')
+    labels=$(tmux list-panes -t "$session" -F '#{@smux_label}' 2>/dev/null | awk 'NF { printf "%s%s", sep, $0; sep=", " }')
+    short_project="${project/#$HOME/~}"
+    printf "%-12s %-28s %-7s %s\n" "$session" "$short_project" "$panes" "${labels:--}"
+  done
+}
+
 cmd_version() {
   echo "smux $VERSION"
 }
@@ -263,8 +665,17 @@ Commands:
   install     Install smux (tmux config + tmux-bridge)
   update      Update to the latest version
   uninstall   Remove smux and restore previous config
+  start       Start a .smux tmux workspace
+  stop        Stop a smux-managed session
+  attach      Attach to a session
+  status      List smux-managed sessions
   version     Print version
   help        Show this help
+
+Workspace:
+  smux start [-n <name>] [-d] [--replace] [--dry-run] [--preview]
+  smux stop  [-n <name>]
+  smux attach [-n <name>]
 
 Files:
   ~/.smux/tmux.conf          tmux configuration
@@ -286,9 +697,13 @@ else
 fi
 
 case "${1:-$_smux_default}" in
-  install)                    cmd_install ;;
-  update)                     cmd_update ;;
-  uninstall|remove)           cmd_uninstall ;;
+  install)                    [[ $# -gt 0 ]] && shift; cmd_install "$@" ;;
+  update)                     [[ $# -gt 0 ]] && shift; cmd_update "$@" ;;
+  uninstall|remove)           [[ $# -gt 0 ]] && shift; cmd_uninstall "$@" ;;
+  start)                      [[ $# -gt 0 ]] && shift; cmd_start "$@" ;;
+  stop)                       [[ $# -gt 0 ]] && shift; cmd_stop "$@" ;;
+  attach)                     [[ $# -gt 0 ]] && shift; cmd_attach "$@" ;;
+  status)                     [[ $# -gt 0 ]] && shift; cmd_status "$@" ;;
   version|--version|-v|-V)    cmd_version ;;
   help|--help|-h)             cmd_help ;;
   *)                          error "Unknown command: $1. Run 'smux help' for usage." ;;

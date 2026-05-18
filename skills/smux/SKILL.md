@@ -1,13 +1,37 @@
 ---
 name: smux
-description: Control tmux panes and communicate between AI agents. Use this skill whenever the user mentions tmux panes, cross-pane communication, sending messages to other agents, reading other panes, managing tmux sessions, or interacting with processes running in tmux. Includes tmux-bridge CLI for agent-to-agent messaging and raw tmux commands for direct session control.
+description: Control tmux panes and communicate between AI agents. Use this skill whenever the user mentions tmux panes, cross-pane communication, sending messages to other agents, reading other panes, managing tmux sessions, or interacting with processes running in tmux. Includes tmux-bridge CLI for agent-to-agent messaging, smux CLI for workspace lifecycle, and raw tmux commands for direct session control.
 metadata:
-  { "openclaw": { "emoji": "🖥️", "os": ["darwin", "linux"], "requires": { "bins": ["tmux", "tmux-bridge"] } } }
+  { "openclaw": { "emoji": "🖥️", "os": ["darwin", "linux"], "requires": { "bins": ["tmux", "tmux-bridge", "smux"] } } }
 ---
 
 # smux
 
-Tmux pane control and cross-pane agent communication. Use `tmux-bridge` (the high-level CLI) for all cross-pane interactions. Fall back to raw tmux commands only when you need low-level control.
+Tmux pane control and cross-pane agent communication. Use `tmux-bridge` (the high-level CLI) for all cross-pane interactions. Use `smux start/stop/attach/status` for workspace lifecycle. Fall back to raw tmux commands only when you need low-level control.
+
+## smux Workspace Commands
+
+Define a multi-pane tmux workspace with a `.smux` file and launch it with one command.
+
+```
+.smux syntax:
+  | split columns     , stack within column
+  Each cell: LABEL COMMAND (or just LABEL for empty shell pane)
+
+  cmd | writer codex, tester "npm test | grep skip" | reviewer claude
+```
+
+| Command | Description |
+|---|---|
+| `smux start` | Create a tmux session from `.smux` |
+| `smux start --preview` | Show Unicode layout preview without creating anything |
+| `smux start --dry-run` | Print parsed session/pane plan |
+| `smux start -d` | Start detached (CI / remote) |
+| `smux start --replace` | Replace existing smux session |
+| `smux start -n <name>` | Custom session name (`[A-Za-z0-9_.-]+`) |
+| `smux stop` | Kill the smux-managed session |
+| `smux attach` | Re-attach to the session |
+| `smux status` | List all smux-managed sessions |
 
 ## tmux-bridge — Cross-Pane Communication
 
@@ -31,7 +55,7 @@ The CLI enforces read-before-act. You cannot `type` or `keys` to a pane unless y
 3. After a successful `type`/`keys`, the mark is cleared — you must read again before the next interaction
 
 ```
-$ tmux-bridge type codex "hello"
+$ tmux-bridge type codex 'hello'
 error: must read the pane before interacting. Run: tmux-bridge read codex
 ```
 
@@ -40,13 +64,28 @@ error: must read the pane before interacting. Run: tmux-bridge read codex
 | Command | Description | Example |
 |---|---|---|
 | `tmux-bridge list` | Show all panes with target, pid, command, size, label | `tmux-bridge list` |
-| `tmux-bridge type <target> <text>` | Type text without pressing Enter | `tmux-bridge type codex "hello"` |
-| `tmux-bridge message <target> <text>` | Type text with auto sender info and reply target | `tmux-bridge message codex "review src/auth.ts"` |
+| `tmux-bridge type <target> <text>` | Type text without pressing Enter | `tmux-bridge type codex 'hello'` |
+| `tmux-bridge message <target> <text>` | Type text with auto sender info and reply target | `tmux-bridge message codex 'review src/auth.ts'` |
 | `tmux-bridge read <target> [lines]` | Read last N lines (default 50) | `tmux-bridge read codex 100` |
 | `tmux-bridge keys <target> <key>...` | Send special keys | `tmux-bridge keys codex Enter` |
 | `tmux-bridge name <target> <label>` | Label a pane (visible in tmux border) | `tmux-bridge name %3 codex` |
 | `tmux-bridge resolve <label>` | Print pane target for a label | `tmux-bridge resolve codex` |
 | `tmux-bridge id` | Print this pane's ID | `tmux-bridge id` |
+
+### Quote Convention
+
+**Always wrap message/type text in single quotes `'...'`.** Single quotes prevent shell expansion of `$`, `!`, and other special characters.
+
+```
+tmux-bridge message codex 'Please review src/auth.ts'   # correct
+tmux-bridge message codex "review src/auth.ts"           # avoid — $ and ! may expand
+```
+
+**If your message contains a single quote (`'`), escape it by ending the quote, adding an escaped quote, and resuming:**
+
+```
+tmux-bridge message codex 'I can'\''t do that right now'
+```
 
 ### Target Resolution
 
@@ -71,7 +110,7 @@ tmux-bridge keys codex Enter                 # 4. KEYS — submit
 **Approving a prompt (non-agent pane):**
 ```bash
 tmux-bridge read worker 10                   # 1. READ — see the prompt
-tmux-bridge type worker "y"                  # 2. TYPE
+tmux-bridge type worker 'y'                  # 2. TYPE
 tmux-bridge read worker 10                   # 3. READ — verify
 tmux-bridge keys worker Enter                # 4. KEYS — submit
 tmux-bridge read worker 20                   # 5. READ — see the result
@@ -82,7 +121,7 @@ tmux-bridge read worker 20                   # 5. READ — see the result
 The `message` command auto-prepends sender info and location:
 
 ```
-[tmux-bridge from:claude pane:%4 at:3:0.0] Please review src/auth.ts
+[tmux-bridge from:claude pane:%4 at:shared:0.0] Please review src/auth.ts
 ```
 
 The receiver gets: who sent it (`from`), the exact pane to reply to (`pane`), and the session/window location (`at`). When you see this header, reply using tmux-bridge to the pane ID from the header.
@@ -115,7 +154,7 @@ tmux-bridge keys codex Enter
 
 **Agent B (codex) sees in their prompt:**
 ```
-[tmux-bridge from:claude pane:%4 at:3:0.0] What is the test coverage for src/auth.ts?
+[tmux-bridge from:claude pane:%4 at:shared:0.0] What is the test coverage for src/auth.ts?
 ```
 
 **Agent B replies using the pane ID from the header:**
@@ -143,16 +182,16 @@ tmux capture-pane -t shared:0.0 -p           # Specific pane
 ### Send Keys
 
 ```bash
-tmux send-keys -t shared -l -- "text here"   # Type text (literal mode)
-tmux send-keys -t shared Enter               # Press Enter
-tmux send-keys -t shared Escape              # Press Escape
-tmux send-keys -t shared C-c                 # Ctrl+C
-tmux send-keys -t shared C-d                 # Ctrl+D (EOF)
+tmux send-keys -t shared -l -- 'text here'    # Type text (literal mode)
+tmux send-keys -t shared Enter                # Press Enter
+tmux send-keys -t shared Escape               # Press Escape
+tmux send-keys -t shared C-c                  # Ctrl+C
+tmux send-keys -t shared C-d                  # Ctrl+D (EOF)
 ```
 
 For interactive TUIs, split text and Enter into separate sends:
 ```bash
-tmux send-keys -t shared -l -- "Please apply the patch"
+tmux send-keys -t shared -l -- 'Please apply the patch'
 sleep 0.1
 tmux send-keys -t shared Enter
 ```
@@ -184,7 +223,7 @@ tmux rename-session -t old new
 
 ```bash
 # Check if session needs input
-tmux capture-pane -t worker-3 -p | tail -10 | grep -E "❯|Yes.*No|proceed|permission"
+tmux capture-pane -t worker-3 -p | tail -10 | grep -E '❯|Yes.*No|proceed|permission'
 
 # Approve a prompt
 tmux send-keys -t worker-3 'y' Enter
