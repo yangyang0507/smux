@@ -39,7 +39,7 @@ All error strings live in `cmd_start`, `parse_layout`, `session_name_for`, `find
 
 ```bash
 smux init                                      # print DSL guide (no write)
-smux init 'cmd | codex codex | claude claude'   # validate and write
+smux init 'codex codex | claude claude'         # validate and write
 smux init --force 'cmd | codex'                 # overwrite existing
 ```
 
@@ -171,7 +171,7 @@ Read-only diagnostic. Reports `[ok]` / `[warn]` / `[fail]` with suggested fixes.
 smux doctor
 [ok]   tmux installed: 3.6a
 [ok]   tmux server reachable (2 sessions)
-[ok]   smux CLI: ~/.smux/bin/smux 2.0.1
+[ok]   smux CLI: ~/.smux/bin/smux 2.1.0
 [ok]   tmux-bridge: ~/.smux/bin/tmux-bridge
 [ok]   tmux config loaded (smux)
 [warn] project .smux not found in /path/foo → run 'smux init'
@@ -188,7 +188,7 @@ A single `cmd_doctor()` function that runs each check and prints the result line
 
 | File | Change | Added |
 |------|--------|-------|
-| `install.sh` | `cmd_init`, `cmd_doctor`, improved error strings | ~100 lines |
+| `install.sh` | `cmd_init`, `cmd_doctor`, improved error strings | ~200 lines |
 | `docs/design-v2.1.md` | This document | new |
 | `skills/smux/SKILL.md` | Add `init`/`doctor` to workspace commands table | minor |
 | `README.md` | Mention v2.1 features | minor |
@@ -198,7 +198,7 @@ A single `cmd_doctor()` function that runs each check and prints the result line
 ## 5. Not in Scope
 
 - Automatic doctor fixes (keeps it read-only)
-- Interactive wizard / template picker (default template is sufficient)
+- Interactive wizard / template picker / default template writing
 - Global templates / `~/.config/smux/`
 - JSON/structured output
 - Pane size constraints

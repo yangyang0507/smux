@@ -2,7 +2,7 @@
 # smux — one-command tmux setup
 set -euo pipefail
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 REPO="yangyang0507/smux"
 BRANCH="main"
 BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
@@ -21,6 +21,10 @@ NC='\033[0m'
 info()  { printf "${GREEN}[smux]${NC} %s\n" "$*"; }
 warn()  { printf "${YELLOW}[smux]${NC} %s\n" "$*"; }
 error() { printf "${RED}[smux]${NC} %s\n" "$*" >&2; exit 1; }
+doctor_ok() { printf "[ok]   %s\n" "$*"; }
+doctor_warn() { printf "[warn] %s\n" "$*"; }
+doctor_fail() { printf "[fail] %s\n" "$*"; }
+doctor_info() { printf "[info] %s\n" "$*"; }
 
 # --- OS / package manager detection ---
 
@@ -155,7 +159,26 @@ find_project_root() {
       echo "$dir"
       return
     fi
-    [[ "$dir" == "/" ]] && error "No .smux found from $PWD upward."
+    [[ "$dir" == "/" ]] && error "No .smux found from $PWD upward. Run 'smux init' to create one."
+    dir=$(dirname "$dir")
+  done
+}
+
+find_project_root_safe() {
+  local dir="$PWD"
+  while :; do
+    if [[ -f "$dir/.smux" ]]; then
+      if [[ "$dir" == "$HOME" && "$PWD" != "$HOME" ]]; then
+        echo "Refusing to use ~/.smux as an implicit fallback from $PWD. Run from ~ to use it as a workspace, or create .smux in this project." >&2
+        return 2
+      fi
+      echo "$dir"
+      return 0
+    fi
+    if [[ "$dir" == "/" ]]; then
+      echo "No .smux found from $PWD upward. Run 'smux init' to create one." >&2
+      return 1
+    fi
     dir=$(dirname "$dir")
   done
 }
@@ -163,7 +186,7 @@ find_project_root() {
 session_name_for() {
   local project="$1" name="${2:-}"
   [[ -n "$name" ]] || name=$(basename "$project")
-  valid_name "$name" || error "Invalid session name '$name'. Use -n with [A-Za-z0-9_.-]+."
+  valid_name "$name" || error "Invalid session name '$name'. Session names must match [A-Za-z0-9_.-]+. Use 'smux start -n my-project'."
   echo "$name"
 }
 
@@ -173,20 +196,21 @@ session_project() {
 
 require_smux_session() {
   local session="$1" project
-  tmux has-session -t "$session" 2>/dev/null || error "No tmux session named '$session'."
+  tmux has-session -t "$session" 2>/dev/null || error "No tmux session named '$session'. Run 'smux status' to list smux-managed sessions."
   project=$(session_project "$session")
-  [[ -n "$project" ]] || error "Session '$session' is not managed by smux; refusing."
+  [[ -n "$project" ]] || error "Session '$session' already exists but is not managed by smux. Choose another name with '-n', or handle it manually in tmux."
 }
 
 layout_line() {
-  local file="$1" line clean found=""
+  local file="$1" line clean found="" count=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     clean=$(trim "$line")
     [[ -z "$clean" || "${clean:0:1}" == "#" ]] && continue
-    [[ -z "$found" ]] || error ".smux must contain exactly one layout line."
+    (( count += 1 ))
+    [[ $count -eq 1 ]] || error ".smux has multiple layout lines. .smux requires exactly one layout line."
     found="$clean"
   done < "$file"
-  [[ -n "$found" ]] || error ".smux has no layout line."
+  [[ -n "$found" ]] || error ".smux is empty. .smux requires exactly one layout line. Run 'smux init' for examples."
   echo "$found"
 }
 
@@ -256,21 +280,21 @@ COL_COUNT_TOTAL=0
 # everything after is the command (may be empty = shell pane).
 parse_layout() {
   local line="$1" col cell label cmd rest col_start col_count
-  quote_balanced "$line" || error "Unclosed quote in .smux layout."
+  quote_balanced "$line" || error "Unclosed quote in .smux layout: $line. Fix the quote, then run 'smux start --dry-run' to verify."
   PANE_LABELS=(); PANE_COMMANDS=(); PANE_COLS=(); COL_START=(); COL_COUNT=()
   PANE_COUNT=0; COL_COUNT_TOTAL=0
   while IFS= read -r col; do
     col=$(trim "$col")
-    [[ -n "$col" ]] || error "Empty column in .smux layout."
+    [[ -n "$col" ]] || error "Empty column in .smux layout: $line. Remove the extra '|' or add a label."
     col_start=$PANE_COUNT
     col_count=0
     while IFS= read -r cell; do
       cell=$(trim "$cell")
-      [[ -n "$cell" ]] || error "Empty pane in .smux layout."
+      [[ -n "$cell" ]] || error "Empty pane in .smux layout: $line. Remove the extra comma or add a label."
       label="${cell%%[[:space:]]*}"
       rest="${cell#"$label"}"
       cmd=$(unquote_command "$rest")
-      valid_name "$label" || error "Invalid label '$label'. Use [A-Za-z0-9_.-]+."
+      valid_name "$label" || error "Invalid label '$label'. Labels must match [A-Za-z0-9_.-]+. Use a label like 'test-runner npm test'."
       PANE_LABELS[$PANE_COUNT]="$label"
       PANE_COMMANDS[$PANE_COUNT]="$cmd"
       PANE_COLS[$PANE_COUNT]="$COL_COUNT_TOTAL"
@@ -396,8 +420,8 @@ start_layout() {
   # --- Duplicate / safety check ---
   if tmux has-session -t "$session" 2>/dev/null; then
     marker=$(session_project "$session")
-    [[ -n "$marker" ]] || error "Session '$session' exists and is not managed by smux."
-    (( replace )) || error "Session '$session' already exists. Use 'smux attach -n $session' or --replace."
+    [[ -n "$marker" ]] || error "Session '$session' already exists but is not managed by smux. Choose another name with '-n', or handle it manually in tmux."
+    (( replace )) || error "Session '$session' already exists and is smux-managed. Use 'smux attach -n $session', or 'smux start --replace' to rebuild it."
     tmux kill-session -t "$session"
   fi
   local pane col idx j k pct prev
@@ -650,6 +674,177 @@ cmd_status() {
   done
 }
 
+cmd_init() {
+  local force=0 layout=""
+  while (($#)); do
+    case "$1" in
+      --force) force=1; shift ;;
+      --help|-h) layout=""; shift; break ;;
+      --*) error "Unknown init option: $1" ;;
+      *) layout="${layout:+$layout }$1"; shift ;;
+    esac
+  done
+
+  if [[ -z "$layout" ]]; then
+    cat <<'INIT_HELP'
+Usage: smux init [--force] '<layout>'
+
+Common layouts:
+  Two agents:
+    codex codex | claude claude
+  Agent + shell:
+    codex codex | cmd
+  Writer + tests:
+    writer codex, tester npm test
+  Full workflow:
+    cmd | writer codex, tester "npm test" | reviewer claude
+
+Syntax:
+  LABEL COMMAND    pane labeled LABEL running COMMAND
+  LABEL            empty shell pane (e.g. `cmd`)
+  |                split columns
+  ,                stack within column
+
+  Tip: `cmd` is just a label, not a required keyword.
+
+Examples:
+  smux init 'codex codex | claude claude'
+  smux init 'cmd | writer codex, tester "npm test" | reviewer claude'
+
+Then: smux start --preview  (or)  smux start
+INIT_HELP
+    return 0
+  fi
+
+  parse_layout "$layout"
+
+  if [[ -f ".smux" ]] && (( ! force )); then
+    error ".smux already exists. Use 'smux init --force <layout>' to overwrite."
+  fi
+
+  {
+    echo "# | split columns     , stack within column"
+    echo "# Each cell: LABEL COMMAND (or just LABEL for empty shell)"
+    echo ""
+    echo "$layout"
+  } > .smux
+
+  info "Created .smux:"
+  cat .smux
+  echo ""
+  info "Next: smux start --preview  (or)  smux start"
+}
+
+cmd_doctor() {
+  echo "smux doctor"
+
+  local tmux_version="" major=0 minor=0 sessions="" session_count=0
+  if command -v tmux >/dev/null 2>&1; then
+    tmux_version=$(tmux -V 2>/dev/null || true)
+    doctor_ok "tmux installed: ${tmux_version:-unknown version}"
+    local ver
+    ver=$(printf '%s' "$tmux_version" | grep -oE '[0-9]+\.[0-9]+' | head -1 || echo "0.0")
+    major=$(echo "$ver" | cut -d. -f1)
+    minor=$(echo "$ver" | cut -d. -f2)
+    if (( major < 3 || (major == 3 && minor < 2) )); then
+      doctor_warn "tmux $ver detected; tmux 3.2+ is recommended."
+    else
+      doctor_ok "tmux version is supported."
+    fi
+  else
+    doctor_fail "tmux not found. Install tmux, then run 'smux doctor' again."
+  fi
+
+  if command -v tmux >/dev/null 2>&1; then
+    if sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null); then
+      session_count=$(printf '%s\n' "$sessions" | awk 'NF { count++ } END { print count+0 }')
+      doctor_ok "tmux server reachable (${session_count} sessions)"
+    else
+      doctor_warn "tmux server has no running sessions, or is not reachable yet. Start tmux or run 'smux start'."
+    fi
+  fi
+
+  local smux_path bridge_path smux_version
+  smux_path=$(command -v smux 2>/dev/null || true)
+  if [[ -n "$smux_path" ]]; then
+    smux_version=$(smux version 2>/dev/null || true)
+    if [[ "$smux_version" == "smux $VERSION" ]]; then
+      doctor_ok "smux CLI: $smux_path ${smux_version#smux }"
+    else
+      doctor_warn "smux CLI: $smux_path ${smux_version#smux }; this script is $VERSION. Fix: smux update"
+    fi
+  else
+    doctor_warn "smux CLI not found in PATH. Run: export PATH=\"\$HOME/.smux/bin:\$PATH\""
+  fi
+
+  bridge_path=$(command -v tmux-bridge 2>/dev/null || true)
+  if [[ -n "$bridge_path" && -x "$bridge_path" ]]; then
+    doctor_ok "tmux-bridge: $bridge_path"
+  else
+    doctor_fail "tmux-bridge not found in PATH. Run 'smux install' or update PATH."
+  fi
+
+  if command -v tmux >/dev/null 2>&1; then
+    local border_format
+    border_format=$(tmux show-options -gqv pane-border-format 2>/dev/null || true)
+    if [[ "$border_format" == *"@name"* ]]; then
+      doctor_ok "tmux config loaded (pane labels enabled)"
+    else
+      doctor_warn "tmux config may not be loaded; pane-border-format does not reference @name. Fix: tmux source-file ~/.smux/tmux.conf"
+    fi
+  fi
+
+  local project="" project_err="" line="" session="" parse_err=""
+  project_err=$(mktemp "${TMPDIR:-/tmp}/smux-doctor-project.XXXXXX")
+  if project=$(find_project_root_safe 2>"$project_err"); then
+    doctor_ok "project .smux: $project/.smux"
+    if line=$(layout_line "$project/.smux" 2>"$project_err") &&
+       parse_err=$( (parse_layout "$line"; printf '%s|%s' "$PANE_COUNT" "$COL_COUNT_TOTAL") 2>"$project_err"); then
+      doctor_ok "layout parses: ${parse_err%%|*} panes, ${parse_err##*|} columns"
+      if session=$(session_name_for "$project" "" 2>/dev/null); then
+        if tmux has-session -t "$session" 2>/dev/null; then
+          local marker
+          marker=$(session_project "$session")
+          if [[ -n "$marker" ]]; then
+            doctor_info "default session '$session' already exists and is smux-managed. Use 'smux attach -n $session'."
+          else
+            doctor_warn "default session '$session' exists but is not managed by smux. Use 'smux start -n <name>' or handle it manually in tmux."
+          fi
+        else
+          doctor_ok "default session '$session' is available"
+        fi
+      else
+        doctor_warn "default session name is invalid. Use 'smux start -n my-project'."
+      fi
+    else
+      doctor_fail "project .smux does not parse. Run 'smux start --dry-run' for details."
+    fi
+  else
+    local msg
+    msg=$(cat "$project_err" 2>/dev/null || true)
+    doctor_warn "${msg:-project .smux not found. Run 'smux init' to create one.}"
+  fi
+  rm -f "$project_err"
+
+  if command -v tmux >/dev/null 2>&1 && tmux list-sessions >/dev/null 2>&1; then
+    local found=0 sess managed_project panes missing labels short_project
+    while IFS='|' read -r sess managed_project; do
+      [[ -n "$managed_project" ]] || continue
+      found=1
+      panes=$(tmux list-panes -t "$sess" -F '#{pane_id}' 2>/dev/null | wc -l | tr -d ' ')
+      missing=$(tmux list-panes -t "$sess" -F '#{@smux_label}' 2>/dev/null | awk 'NF == 0 { count++ } END { print count+0 }')
+      labels=$(tmux list-panes -t "$sess" -F '#{@smux_label}' 2>/dev/null | awk 'NF { printf "%s%s", sep, $0; sep=", " }')
+      short_project="${managed_project/#$HOME/~}"
+      if (( missing > 0 )); then
+        doctor_warn "smux session '$sess': $panes panes, $missing missing labels, project $short_project"
+      else
+        doctor_info "smux session '$sess': $panes panes (${labels:-no labels}), project $short_project"
+      fi
+    done < <(tmux list-sessions -F '#{session_name}|#{@smux_project}' 2>/dev/null)
+    (( found )) || doctor_info "smux sessions: none"
+  fi
+}
+
 cmd_version() {
   echo "smux $VERSION"
 }
@@ -664,14 +859,17 @@ Commands:
   install     Install smux (tmux config + tmux-bridge)
   update      Update to the latest version
   uninstall   Remove smux and restore previous config
+  init        Create a .smux layout file
   start       Start a .smux tmux workspace
   stop        Stop a smux-managed session
   attach      Attach to a session
   status      List smux-managed sessions
+  doctor      Diagnose smux and tmux setup
   version     Print version
   help        Show this help
 
 Workspace:
+  smux init [--force] '<layout>'
   smux start [-n <name>] [-d] [--replace] [--dry-run] [--preview]
   smux stop  [-n <name>]
   smux attach [-n <name>]
@@ -699,10 +897,12 @@ case "${1:-$_smux_default}" in
   install)                    [[ $# -gt 0 ]] && shift; cmd_install "$@" ;;
   update)                     [[ $# -gt 0 ]] && shift; cmd_update "$@" ;;
   uninstall|remove)           [[ $# -gt 0 ]] && shift; cmd_uninstall "$@" ;;
+  init)                       [[ $# -gt 0 ]] && shift; cmd_init "$@" ;;
   start)                      [[ $# -gt 0 ]] && shift; cmd_start "$@" ;;
   stop)                       [[ $# -gt 0 ]] && shift; cmd_stop "$@" ;;
   attach)                     [[ $# -gt 0 ]] && shift; cmd_attach "$@" ;;
   status)                     [[ $# -gt 0 ]] && shift; cmd_status "$@" ;;
+  doctor)                     [[ $# -gt 0 ]] && shift; cmd_doctor "$@" ;;
   version|--version|-v|-V)    cmd_version ;;
   help|--help|-h)             cmd_help ;;
   *)                          error "Unknown command: $1. Run 'smux help' for usage." ;;

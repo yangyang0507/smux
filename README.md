@@ -7,6 +7,8 @@ One-command tmux setup with terminal automation for AI agents.
 - **Agent-to-agent** — Claude Code can prompt Codex in the next pane, and Codex replies back. Any agent that can run bash can participate.
 - **Declarative workspace** — define pane layout + startup commands in `.smux`, launch with one command
 
+📖 **[smux Tutorial](docs/tutorial.md)** — complete guide covering tmux, smux, and tmux-bridge
+
 ```bash
 tmux-bridge read codex 20
 tmux-bridge message codex 'review src/auth.ts'
@@ -98,14 +100,18 @@ See the [smux skill](skills/smux/SKILL.md) for full documentation on agent-to-ag
 ## Workspace Commands
 
 ```bash
+smux init [--force] '<layout>'
 smux start [-n <name>] [-d] [--replace] [--dry-run] [--preview]
 smux stop  [-n <name>]
 smux attach [-n <name>]
 smux status
+smux doctor
 ```
 
 | Command | Description |
 |---|---|
+| `smux init` | Show `.smux` syntax help and common layouts |
+| `smux init '<layout>'` | Validate and write `.smux` in the current directory |
 | `smux start` | Create a tmux session from `.smux` layout |
 | `smux start --dry-run` | Print the parsed session/pane plan without creating anything |
 | `smux start --preview` | Show the layout without creating anything |
@@ -114,6 +120,7 @@ smux status
 | `smux stop` | Kill the smux-managed session |
 | `smux attach` | Re-attach to the session |
 | `smux status` | List all smux-managed sessions |
+| `smux doctor` | Diagnose tmux, config, project layout, and sessions |
 
 `.smux` syntax:
 ```

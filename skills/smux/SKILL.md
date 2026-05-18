@@ -23,6 +23,8 @@ Define a multi-pane tmux workspace with a `.smux` file and launch it with one co
 
 | Command | Description |
 |---|---|
+| `smux init` | Show `.smux` syntax help and common layouts |
+| `smux init '<layout>'` | Validate and write `.smux` in the current directory |
 | `smux start` | Create a tmux session from `.smux` |
 | `smux start --preview` | Show Unicode layout preview without creating anything |
 | `smux start --dry-run` | Print parsed session/pane plan |
@@ -32,6 +34,7 @@ Define a multi-pane tmux workspace with a `.smux` file and launch it with one co
 | `smux stop` | Kill the smux-managed session |
 | `smux attach` | Re-attach to the session |
 | `smux status` | List all smux-managed sessions |
+| `smux doctor` | Diagnose tmux, config, project layout, and sessions |
 
 ## tmux-bridge — Cross-Pane Communication
 
