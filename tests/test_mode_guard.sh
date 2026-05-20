@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Tests for require_normal_mode — rejects type/message/keys when target in copy-mode.
+# Creates an isolated tmux session for testing, cleans up after.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/assert.sh"
+
+eval "$(sed '/^# --- Main ---$/q' "$SCRIPT_DIR/../scripts/tmux-bridge")"
+
+# Override die to not exit
+die() { echo "error: $*" >&2; return 1; }
+
+# Use an isolated tmux session
+TEST_SESSION="smux-test-mode-$$"
+cleanup() { tmux kill-session -t "$TEST_SESSION" 2>/dev/null || true; }
+trap cleanup EXIT
+
+# Create detached test session
+tmux new-session -d -s "$TEST_SESSION" -c "$SCRIPT_DIR/.."
+TEST_PANE=$(tmux display-message -t "$TEST_SESSION" -p '#{pane_id}')
+# Initialize socket detection for the test session
+init_socket
+
+echo "=== test_mode_guard.sh ==="
+
+# ---- normal mode passes ----
+test_name "require_normal_mode passes in normal mode"
+# Default mode is 0 (normal)
+if require_normal_mode "$TEST_PANE" 2>/dev/null; then
+  echo -e "    ${GREEN}OK${NC}"
+  ((ASSERT_PASSED++))
+else
+  fail "require_normal_mode should pass for normal mode pane"
+fi
+
+# ---- copy-mode rejects ----
+test_name "require_normal_mode rejects in copy-mode"
+tmux copy-mode -t "$TEST_PANE"
+sleep 0.1
+if require_normal_mode "$TEST_PANE" 2>/dev/null; then
+  fail "require_normal_mode should reject copy-mode pane"
+else
+  echo -e "    ${GREEN}OK${NC}"
+  ((ASSERT_PASSED++))
+fi
+
+# ---- error message contains hint ----
+test_name "require_normal_mode error message has Escape/q hint"
+err=$(require_normal_mode "$TEST_PANE" 2>&1 || true)
+assert_contains "$err" "Press Escape/q"
+
+# ---- back to normal mode passes ----
+test_name "require_normal_mode passes after exiting copy-mode"
+tmux send-keys -t "$TEST_PANE" Escape
+sleep 0.1
+if require_normal_mode "$TEST_PANE" 2>/dev/null; then
+  echo -e "    ${GREEN}OK${NC}"
+  ((ASSERT_PASSED++))
+else
+  fail "require_normal_mode should pass after exiting copy-mode"
+fi
+
+summary
