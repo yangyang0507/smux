@@ -8,6 +8,7 @@ BRANCH="main"
 BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 SMUX_DIR="$HOME/.smux"
 BIN_DIR="$SMUX_DIR/bin"
+COMPLETION_DIR="$SMUX_DIR/completions"
 BACKUP_DIR="$SMUX_DIR/backups"
 TMUX_XDG_DIR="$HOME/.config/tmux"
 
@@ -114,6 +115,39 @@ ensure_path() {
   if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
     export PATH="$BIN_DIR:$PATH"
   fi
+}
+
+rc_files() {
+  printf '%s\n' \
+    "$HOME/.bashrc" \
+    "$HOME/.bash_profile" \
+    "$HOME/.profile" \
+    "$HOME/.zshrc"
+}
+
+rc_references_completion() {
+  local name="$1" file rc
+  file="$COMPLETION_DIR/${name}.bash"
+  while IFS= read -r rc; do
+    [[ -f "$rc" ]] || continue
+    if grep -Fq "$file" "$rc" ||
+       grep -Fq "\$HOME/.smux/completions/${name}.bash" "$rc" ||
+       grep -Fq "~/.smux/completions/${name}.bash" "$rc" ||
+       grep -Fq "$COMPLETION_DIR" "$rc" ||
+       grep -Fq "\$HOME/.smux/completions" "$rc" ||
+       grep -Fq "~/.smux/completions" "$rc"; then
+      printf '%s\n' "$rc"
+      return 0
+    fi
+  done < <(rc_files)
+  return 1
+}
+
+completion_source_hint() {
+  cat <<'EOF'
+source "$HOME/.smux/completions/tmux-bridge.bash"
+source "$HOME/.smux/completions/smux.bash"
+EOF
 }
 
 download() {
@@ -491,7 +525,7 @@ cmd_install() {
   fi
 
   # 3. Create directories
-  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$BACKUP_DIR"
+  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$COMPLETION_DIR" "$BACKUP_DIR"
 
   # 4. Back up existing config
   backup_existing
@@ -514,33 +548,42 @@ cmd_install() {
   download "$BASE_URL/install.sh" "$BIN_DIR/smux"
   chmod +x "$BIN_DIR/smux"
 
-  # 9. Ensure PATH
+  # 9. Install shell completions
+  info "Installing shell completions..."
+  download "$BASE_URL/completions/tmux-bridge.bash" "$COMPLETION_DIR/tmux-bridge.bash"
+  download "$BASE_URL/completions/smux.bash" "$COMPLETION_DIR/smux.bash"
+
+  # 10. Ensure PATH
   ensure_path
 
-  # 10. Reload tmux if running
+  # 11. Reload tmux if running
   if tmux list-sessions &>/dev/null; then
     tmux source-file "$SMUX_DIR/tmux.conf" 2>/dev/null && info "Reloaded tmux config." || true
   fi
 
-  # 11. Done
+  # 12. Done
   echo ""
   printf "${GREEN}${BOLD}smux installed!${NC}\n"
   echo ""
   echo "  Config:       ~/.smux/tmux.conf"
   echo "  tmux-bridge:  ~/.smux/bin/tmux-bridge"
   echo "  smux CLI:     ~/.smux/bin/smux"
+  echo "  Completions:  ~/.smux/completions/"
   echo ""
   echo "  Run 'smux help' for commands."
   if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BIN_DIR"; then
     echo ""
     warn "Restart your shell or run: export PATH=\"\$HOME/.smux/bin:\$PATH\""
   fi
+  echo ""
+  echo "  To enable tab completion, add to your shell rc:"
+  completion_source_hint | sed 's/^/    /'
 }
 
 cmd_update() {
   info "Updating smux..."
 
-  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$BACKUP_DIR"
+  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$COMPLETION_DIR" "$BACKUP_DIR"
   backup_existing
 
   info "Downloading tmux.conf..."
@@ -557,6 +600,10 @@ cmd_update() {
   download "$BASE_URL/install.sh" "$BIN_DIR/smux.new"
   chmod +x "$BIN_DIR/smux.new"
   mv "$BIN_DIR/smux.new" "$BIN_DIR/smux"
+
+  info "Updating shell completions..."
+  download "$BASE_URL/completions/tmux-bridge.bash" "$COMPLETION_DIR/tmux-bridge.bash"
+  download "$BASE_URL/completions/smux.bash" "$COMPLETION_DIR/smux.bash"
 
   if tmux list-sessions &>/dev/null; then
     tmux source-file "$SMUX_DIR/tmux.conf" 2>/dev/null && info "Reloaded tmux config." || true
@@ -789,6 +836,24 @@ cmd_doctor() {
     doctor_fail "tmux-bridge not found in PATH. Run 'smux install' or update PATH."
   fi
 
+  local bridge_completion smux_completion completion_rc
+  bridge_completion="$COMPLETION_DIR/tmux-bridge.bash"
+  smux_completion="$COMPLETION_DIR/smux.bash"
+  if [[ -f "$bridge_completion" && -f "$smux_completion" ]]; then
+    doctor_ok "shell completions installed: $COMPLETION_DIR"
+    if completion_rc=$(rc_references_completion "tmux-bridge") &&
+       rc_references_completion "smux" >/dev/null; then
+      doctor_ok "shell completions sourced: $completion_rc"
+    else
+      doctor_warn "shell completions not sourced. Add these lines to ~/.bashrc, ~/.bash_profile, or ~/.zshrc:"
+      completion_source_hint | while IFS= read -r line; do
+        doctor_info "  $line"
+      done
+    fi
+  else
+    doctor_warn "shell completions not installed. Fix: smux update"
+  fi
+
   if command -v tmux >/dev/null 2>&1; then
     local border_format
     border_format=$(tmux show-options -gqv pane-border-format 2>/dev/null || true)
@@ -883,6 +948,7 @@ Files:
   ~/.smux/tmux.conf          tmux configuration
   ~/.smux/bin/tmux-bridge    cross-pane communication CLI
   ~/.smux/bin/smux           this CLI
+  ~/.smux/completions/       shell completion scripts
   ~/.smux/backups/           config backups
 EOF
 }
