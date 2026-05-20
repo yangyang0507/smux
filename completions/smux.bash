@@ -33,6 +33,9 @@ _smux_complete() {
     init)
       COMPREPLY=( $(compgen -W "--force" -- "$cur") )
       ;;
+    update)
+      COMPREPLY=( $(compgen -W "--check --dry-run" -- "$cur") )
+      ;;
     start)
       if [[ "$prev" == "-n" ]]; then
         return 0

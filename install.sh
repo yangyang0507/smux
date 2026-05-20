@@ -11,6 +11,7 @@ BIN_DIR="$SMUX_DIR/bin"
 COMPLETION_DIR="$SMUX_DIR/completions"
 BACKUP_DIR="$SMUX_DIR/backups"
 TMUX_XDG_DIR="$HOME/.config/tmux"
+SKILL_DIR="$HOME/.agents/skills/smux"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -159,6 +160,110 @@ download() {
   else
     error "Neither curl nor wget found. Install one and re-run."
   fi
+}
+
+checksum_file() {
+  local file="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{ print $1 }'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{ print $1 }'
+  else
+    error "Neither shasum nor sha256sum found. Install one and re-run."
+  fi
+}
+
+validate_installed_file() {
+  local file="$1" dest="${2:-$1}"
+  case "$dest" in
+    "$BIN_DIR/tmux-bridge"|"$BIN_DIR/smux") bash -n "$file" ;;
+    *.bash|*.sh) bash -n "$file" ;;
+    *) return 0 ;;
+  esac
+}
+
+install_file_atomic() {
+  local url="$1" dest="$2" mode="${3:-644}" tmp
+  mkdir -p "$(dirname "$dest")"
+  tmp="${dest}.new.$$"
+  download "$url" "$tmp"
+  chmod "$mode" "$tmp"
+  if ! validate_installed_file "$tmp" "$dest"; then
+    rm -f "$tmp"
+    error "Validation failed for $dest"
+  fi
+  mv "$tmp" "$dest"
+}
+
+sync_manifest() {
+  cat <<EOF
+.tmux.conf|$SMUX_DIR/tmux.conf|644
+scripts/tmux-bridge|$BIN_DIR/tmux-bridge|755
+install.sh|$BIN_DIR/smux|755
+completions/tmux-bridge.bash|$COMPLETION_DIR/tmux-bridge.bash|644
+completions/smux.bash|$COMPLETION_DIR/smux.bash|644
+skills/smux/SKILL.md|$SKILL_DIR/SKILL.md|644
+skills/smux/references/tmux.md|$SKILL_DIR/references/tmux.md|644
+skills/smux/references/tmux-bridge.md|$SKILL_DIR/references/tmux-bridge.md|644
+EOF
+}
+
+source_for_rel() {
+  local rel="$1" tmp_dir="$2" src
+  src="$PWD/$rel"
+  if [[ -f "$src" ]]; then
+    printf '%s\n' "$src"
+  else
+    src="$tmp_dir/${rel//\//__}"
+    download "$BASE_URL/$rel" "$src"
+    printf '%s\n' "$src"
+  fi
+}
+
+cmd_update_check() {
+  local tmp_dir rel dest mode src src_sum dest_sum differences=0 missing=0
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/smux-update-check.XXXXXX")
+
+  echo "smux update --check"
+  while IFS='|' read -r rel dest mode; do
+    [[ -n "$rel" ]] || continue
+    src=$(source_for_rel "$rel" "$tmp_dir")
+    src_sum=$(checksum_file "$src")
+    if [[ ! -f "$dest" ]]; then
+      printf "[missing] %-42s -> %s\n" "$rel" "$dest"
+      ((++missing))
+      continue
+    fi
+    dest_sum=$(checksum_file "$dest")
+    if [[ "$src_sum" == "$dest_sum" ]]; then
+      printf "[ok]      %-42s -> %s\n" "$rel" "$dest"
+    else
+      printf "[diff]    %-42s -> %s\n" "$rel" "$dest"
+      ((++differences))
+    fi
+  done < <(sync_manifest)
+
+  if (( differences == 0 && missing == 0 )); then
+    doctor_ok "installed files match source"
+    rm -rf "$tmp_dir"
+    return 0
+  fi
+  doctor_warn "$differences differing, $missing missing. Run: smux update"
+  rm -rf "$tmp_dir"
+  return 1
+}
+
+install_manifest_files() {
+  local dry_run="${1:-0}" rel dest mode
+  while IFS='|' read -r rel dest mode; do
+    [[ -n "$rel" ]] || continue
+    if [[ "$dry_run" == "1" ]]; then
+      printf "[dry-run] install %-42s -> %s\n" "$rel" "$dest"
+    else
+      info "Installing $rel..."
+      install_file_atomic "$BASE_URL/$rel" "$dest" "$mode"
+    fi
+  done < <(sync_manifest)
 }
 
 # ================================================================
@@ -525,43 +630,27 @@ cmd_install() {
   fi
 
   # 3. Create directories
-  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$COMPLETION_DIR" "$BACKUP_DIR"
+  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$COMPLETION_DIR" "$BACKUP_DIR" "$SKILL_DIR/references"
 
   # 4. Back up existing config
   backup_existing
 
-  # 5. Download tmux.conf
-  info "Downloading tmux.conf..."
-  download "$BASE_URL/.tmux.conf" "$SMUX_DIR/tmux.conf"
+  # 5. Install managed files atomically
+  install_manifest_files 0
 
   # 6. Symlink tmux config
   mkdir -p "$TMUX_XDG_DIR"
   ln -sf "$SMUX_DIR/tmux.conf" "$TMUX_XDG_DIR/tmux.conf"
 
-  # 7. Download tmux-bridge
-  info "Downloading tmux-bridge..."
-  download "$BASE_URL/scripts/tmux-bridge" "$BIN_DIR/tmux-bridge"
-  chmod +x "$BIN_DIR/tmux-bridge"
-
-  # 8. Save smux CLI
-  info "Installing smux CLI..."
-  download "$BASE_URL/install.sh" "$BIN_DIR/smux"
-  chmod +x "$BIN_DIR/smux"
-
-  # 9. Install shell completions
-  info "Installing shell completions..."
-  download "$BASE_URL/completions/tmux-bridge.bash" "$COMPLETION_DIR/tmux-bridge.bash"
-  download "$BASE_URL/completions/smux.bash" "$COMPLETION_DIR/smux.bash"
-
-  # 10. Ensure PATH
+  # 7. Ensure PATH
   ensure_path
 
-  # 11. Reload tmux if running
+  # 8. Reload tmux if running
   if tmux list-sessions &>/dev/null; then
     tmux source-file "$SMUX_DIR/tmux.conf" 2>/dev/null && info "Reloaded tmux config." || true
   fi
 
-  # 12. Done
+  # 9. Done
   echo ""
   printf "${GREEN}${BOLD}smux installed!${NC}\n"
   echo ""
@@ -581,29 +670,40 @@ cmd_install() {
 }
 
 cmd_update() {
+  local check=0 dry_run=0
+  while (($#)); do
+    case "$1" in
+      --check) check=1; shift ;;
+      --dry-run) dry_run=1; shift ;;
+      --help|-h)
+        cat <<'EOF'
+Usage: smux update [--check] [--dry-run]
+
+  --check    Compare source files with installed copies and report drift
+  --dry-run  Show files that would be installed, without writing anything
+EOF
+        return 0 ;;
+      *) error "Unknown update option: $1" ;;
+    esac
+  done
+
+  if (( check )); then
+    cmd_update_check
+    return $?
+  fi
+
   info "Updating smux..."
 
-  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$COMPLETION_DIR" "$BACKUP_DIR"
+  if (( dry_run )); then
+    install_manifest_files 1
+    info "Dry run complete. No files were changed."
+    return 0
+  fi
+
+  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$COMPLETION_DIR" "$BACKUP_DIR" "$SKILL_DIR/references"
   backup_existing
 
-  info "Downloading tmux.conf..."
-  download "$BASE_URL/.tmux.conf" "$SMUX_DIR/tmux.conf"
-
-  info "Downloading tmux-bridge..."
-  download "$BASE_URL/scripts/tmux-bridge" "$BIN_DIR/tmux-bridge"
-  chmod +x "$BIN_DIR/tmux-bridge"
-
-  # Download to a temp file to avoid overwriting the running script.
-  # If we overwrite $BIN_DIR/smux in-place while bash is executing it,
-  # bash may seek into the new file and execute heredoc content as commands.
-  info "Updating smux CLI..."
-  download "$BASE_URL/install.sh" "$BIN_DIR/smux.new"
-  chmod +x "$BIN_DIR/smux.new"
-  mv "$BIN_DIR/smux.new" "$BIN_DIR/smux"
-
-  info "Updating shell completions..."
-  download "$BASE_URL/completions/tmux-bridge.bash" "$COMPLETION_DIR/tmux-bridge.bash"
-  download "$BASE_URL/completions/smux.bash" "$COMPLETION_DIR/smux.bash"
+  install_manifest_files 0
 
   if tmux list-sessions &>/dev/null; then
     tmux source-file "$SMUX_DIR/tmux.conf" 2>/dev/null && info "Reloaded tmux config." || true
@@ -854,6 +954,20 @@ cmd_doctor() {
     doctor_warn "shell completions not installed. Fix: smux update"
   fi
 
+  local sync_report
+  sync_report=$(mktemp "${TMPDIR:-/tmp}/smux-doctor-sync.XXXXXX")
+  if cmd_update_check >"$sync_report" 2>&1; then
+    doctor_ok "installed files match source"
+  else
+    doctor_warn "installed files differ from source. Run: smux update --check"
+    while IFS= read -r line; do
+      case "$line" in
+        \[diff\]*|\[missing\]*) doctor_info "$line" ;;
+      esac
+    done <"$sync_report"
+  fi
+  rm -f "$sync_report"
+
   if command -v tmux >/dev/null 2>&1; then
     local border_format
     border_format=$(tmux show-options -gqv pane-border-format 2>/dev/null || true)
@@ -943,6 +1057,7 @@ Workspace:
   smux start [-n <name>] [-d] [--replace] [--dry-run] [--preview]
   smux stop  [-n <name>]
   smux attach [-n <name>]
+  smux update [--check] [--dry-run]
 
 Files:
   ~/.smux/tmux.conf          tmux configuration
