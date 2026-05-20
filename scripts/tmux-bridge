@@ -3,7 +3,7 @@
 # Any tool that can run bash can use this to talk to other panes.
 set -euo pipefail
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 
 # --- Helpers ---
 
@@ -116,8 +116,10 @@ Usage: tmux-bridge <command> [args...]
 
 Commands:
   list                      Show all panes (target, pid, command, size, label)
-  type <target> <text>      Type text without pressing Enter
-  message <target> <text>   Type text with auto-prepended sender info and reply target
+  type <target> [flags] [text...]
+                            Type text without pressing Enter
+  message <target> [flags] [text...]
+                            Type text with auto-prepended sender info and reply target
   read <target> [lines]     Read last N lines from pane (default: 50)
   keys <target> <key>...    Send special keys (Enter, Escape, C-c, etc.)
   name <target> <label>     Label a pane (visible in tmux border)
@@ -125,6 +127,13 @@ Commands:
   id                        Print this pane's ID ($TMUX_PANE)
   doctor                    Diagnose tmux connectivity issues
   version                   Print version
+
+Input modes for type/message:
+  --stdin               Read text from stdin (safe shell transport)
+  --base64              Decode a single base64-encoded argument, or stdin with --stdin
+  --                    Treat remaining args as literal text, even if they start with --
+  (omitted text arg)    Auto-read stdin if piped, error if TTY
+  text...               Use argv text directly (simple human one-liners)
 
 Target resolution:
   Targets can be tmux native (session:window.pane, %N) or a label set via 'name'.
@@ -181,11 +190,85 @@ validate_target() {
     || die "invalid target: $target"
 }
 
+require_normal_mode() {
+  local target="$1"
+  local in_mode
+  in_mode=$(tmx display-message -t "$target" -p '#{pane_in_mode}' 2>/dev/null || echo 0)
+  if [[ "$in_mode" != "0" ]]; then
+    die "target pane is in tmux copy-mode or a tmux prompt. Press Escape/q in that pane, then retry."
+  fi
+}
+
 require_args() {
   local need="$1" have="$2" cmd="$3"
   if (( have < need )); then
     die "'$cmd' requires at least $need argument(s). Run 'tmux-bridge' for usage."
   fi
+}
+
+# Parse text input for type/message commands.
+# Flags (--stdin, --base64) are only recognized before the first text token.
+# Use -- to force literal interpretation of remaining arguments.
+# Input precedence: --stdin > --base64 > piped stdin auto-detect > argv text
+parse_text() {
+  local use_stdin=false
+  local use_base64=false
+  local tokens=()
+  local parsing_flags=true
+
+  while [[ $# -gt 0 ]]; do
+    if $parsing_flags; then
+      case "$1" in
+        --stdin)  use_stdin=true; shift ;;
+        --base64) use_base64=true; shift ;;
+        --)       parsing_flags=false; shift ;;
+        *)        parsing_flags=false; tokens+=("$1"); shift ;;
+      esac
+    else
+      tokens+=("$1"); shift
+    fi
+  done
+
+  # Read stdin preserving trailing newlines. The sentinel must be removed before
+  # assigning to the result variable; callers must not wrap this in $(...).
+  read_stdin() {
+    local t
+    t=$(cat; printf x)
+    t="${t%x}"
+    GET_TEXT_RESULT="$t"
+  }
+
+  local text
+
+  if $use_stdin; then
+    read_stdin
+    text="$GET_TEXT_RESULT"
+  elif [[ ${#tokens[@]} -eq 0 ]]; then
+    if [[ ! -t 0 ]]; then
+      read_stdin
+      text="$GET_TEXT_RESULT"
+    else
+      die "missing text. Pipe via stdin (tmux-bridge message <target> --stdin) or provide as argument"
+    fi
+  else
+    if $use_base64 && [[ ${#tokens[@]} -gt 1 ]]; then
+      die "--base64 accepts a single argument, got ${#tokens[@]}. Use --stdin --base64 for complex payloads"
+    fi
+    text="${tokens[*]}"
+  fi
+
+  if $use_base64; then
+    # Validate first for clean error message
+    if ! printf '%s' "$text" | base64 -d >/dev/null 2>&1; then
+      die "--base64: failed to decode input (not valid base64)"
+    fi
+    # Decode preserving trailing newlines
+    local t
+    t=$(printf '%s' "$text" | base64 -d 2>/dev/null; printf x)
+    text="${t%x}"
+  fi
+
+  GET_TEXT_RESULT="$text"
 }
 
 # --- Commands ---
@@ -216,24 +299,32 @@ cmd_list() {
 }
 
 cmd_type() {
-  require_args 2 $# "type"
   require_tmux
-  local target
-  target=$(resolve_target "$1")
+  require_args 1 $# "type"
+  local target text
+  target=$(resolve_target "$1"); shift
   validate_target "$target"
   require_read "$target"
+  require_normal_mode "$target"
 
-  tmx send-keys -t "$target" -l -- "$2"
+  parse_text "$@"
+  text="$GET_TEXT_RESULT"
+
+  tmx send-keys -t "$target" -l -- "$text"
   clear_read "$target"
 }
 
 cmd_message() {
-  require_args 2 $# "message"
   require_tmux
-  local target
-  target=$(resolve_target "$1")
+  require_args 1 $# "message"
+  local target text
+  target=$(resolve_target "$1"); shift
   validate_target "$target"
   require_read "$target"
+  require_normal_mode "$target"
+
+  parse_text "$@"
+  text="$GET_TEXT_RESULT"
 
   # Detect sender identity and location
   local sender_pane="${TMUX_PANE:-}"
@@ -247,7 +338,7 @@ cmd_message() {
   session_win=$(tmx display-message -t "$sender_pane" -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)
 
   local header="[tmux-bridge from:${from} pane:${sender_pane} at:${session_win} — load the smux skill to reply]"
-  tmx send-keys -t "$target" -l -- "${header} $2"
+  tmx send-keys -t "$target" -l -- "${header} $text"
   clear_read "$target"
 }
 
@@ -270,6 +361,7 @@ cmd_keys() {
   target=$(resolve_target "$1")
   validate_target "$target"
   require_read "$target"
+  require_normal_mode "$target"
   shift
 
   for key in "$@"; do

@@ -67,28 +67,46 @@ error: must read the pane before interacting. Run: tmux-bridge read codex
 | Command | Description | Example |
 |---|---|---|
 | `tmux-bridge list` | Show all panes with target, pid, command, size, label | `tmux-bridge list` |
-| `tmux-bridge type <target> <text>` | Type text without pressing Enter | `tmux-bridge type codex 'hello'` |
-| `tmux-bridge message <target> <text>` | Type text with auto sender info and reply target | `tmux-bridge message codex 'review src/auth.ts'` |
+| `tmux-bridge type <target> [flags] [text...]` | Type text without pressing Enter | `printf '%s' "$msg" \| tmux-bridge type codex --stdin` |
+| `tmux-bridge message <target> [flags] [text...]` | Type text with auto sender info and reply target | `printf '%s' "$msg" \| tmux-bridge message codex --stdin` |
 | `tmux-bridge read <target> [lines]` | Read last N lines (default 50) | `tmux-bridge read codex 100` |
 | `tmux-bridge keys <target> <key>...` | Send special keys | `tmux-bridge keys codex Enter` |
 | `tmux-bridge name <target> <label>` | Label a pane (visible in tmux border) | `tmux-bridge name %3 codex` |
 | `tmux-bridge resolve <label>` | Print pane target for a label | `tmux-bridge resolve codex` |
 | `tmux-bridge id` | Print this pane's ID | `tmux-bridge id` |
 
-### Quote Convention
+### Input Modes
 
-**Always wrap message/type text in single quotes `'...'`.** Single quotes prevent shell expansion of `$`, `!`, and other special characters.
+`type` and `message` accept text via three mechanisms, in precedence order: `--stdin` > `--base64` > piped stdin auto-detect > argv text.
 
-```
-tmux-bridge message codex 'Please review src/auth.ts'   # correct
-tmux-bridge message codex "review src/auth.ts"           # avoid — $ and ! may expand
+**Agent path (robust default) — safe shell transport:**
+```bash
+printf '%s' "$msg" | tmux-bridge message codex --stdin
 ```
 
-**If your message contains a single quote (`'`), escape it by ending the quote, adding an escaped quote, and resuming:**
+**Human one-liners — simple messages with no embedded quotes:**
+```bash
+tmux-bridge message codex 'review src/auth.ts'
+```
 
+**Advanced transport — tool calls, JSON, hostile shell contexts:**
+```bash
+# Base64 via stdin (safe, no line-wrapping issues)
+printf '%s' "$msg" | tmux-bridge message codex --stdin --base64
+# Single-arg base64 (portable: tr -d '\n' strips base64 line wrapping)
+b64=$(printf '%s' "$msg" | base64 | tr -d '\n')
+tmux-bridge message codex --base64 "$b64"
 ```
-tmux-bridge message codex 'I can'\''t do that right now'
-```
+
+`--base64` accepts exactly one argv token. Multi-token `--base64` input is rejected — use `--stdin --base64` for complex payloads.
+
+If text is omitted entirely and stdin is piped (non-TTY), stdin is auto-read. This is the default agent behavior.
+
+Shell quoting is fundamentally fragile for AI-generated text. Single quotes (`'...'`) work for simple human messages but fail when the message itself contains `'`. Double quotes (`"..."`) expose `$` and `!` to shell expansion. For agents, always prefer stdin.
+
+`--stdin` and `--base64` only protect the shell-to-`tmux-bridge` transport. `tmux-bridge` still types into a live terminal pane, so the target pane must be in normal input mode. If the target is in tmux copy-mode, search, jump, or another tmux prompt, `type`, `message`, and `keys` fail instead of injecting text into the wrong mode. Press `Escape` or `q` in that pane, then retry.
+
+Keep agent-to-agent messages short and preferably single-line. For long diffs, logs, or reports, write the content to a file and send the path or a concise summary.
 
 ### Target Resolution
 
@@ -103,7 +121,7 @@ Every interaction follows **read → act → read**. The CLI enforces this.
 **Sending a message to an agent:**
 ```bash
 tmux-bridge read codex 20                    # 1. READ — satisfy read guard
-tmux-bridge message codex 'Please review src/auth.ts'
+printf '%s' 'Please review src/auth.ts' | tmux-bridge message codex --stdin
                                               # 2. MESSAGE — auto-prepends sender info, no Enter
 tmux-bridge read codex 20                    # 3. READ — verify text landed
 tmux-bridge keys codex Enter                 # 4. KEYS — submit
@@ -140,7 +158,7 @@ tmux-bridge list
 
 # 3. Send a message (read-act-read)
 tmux-bridge read codex 20
-tmux-bridge message codex 'Please review the changes in src/auth.ts'
+printf '%s' 'Please review the changes in src/auth.ts' | tmux-bridge message codex --stdin
 tmux-bridge read codex 20
 tmux-bridge keys codex Enter
 ```
@@ -150,7 +168,7 @@ tmux-bridge keys codex Enter
 **Agent A (claude) sends:**
 ```bash
 tmux-bridge read codex 20
-tmux-bridge message codex 'What is the test coverage for src/auth.ts?'
+printf '%s' 'What is the test coverage for src/auth.ts?' | tmux-bridge message codex --stdin
 tmux-bridge read codex 20
 tmux-bridge keys codex Enter
 ```
@@ -163,7 +181,7 @@ tmux-bridge keys codex Enter
 **Agent B replies using the pane ID from the header:**
 ```bash
 tmux-bridge read %4 20
-tmux-bridge message %4 '87% line coverage. Missing the OAuth refresh token path (lines 142-168).'
+printf '%s' '87% line coverage. Missing the OAuth refresh token path (lines 142-168).' | tmux-bridge message %4 --stdin
 tmux-bridge read %4 20
 tmux-bridge keys %4 Enter
 ```
@@ -244,7 +262,8 @@ done
 - **Every action clears the read mark** — after `type`, read again before `keys`
 - **Never wait or poll** — agent panes reply via tmux-bridge into YOUR pane
 - **Label panes early** — easier than using `%N` IDs
-- **`type` uses literal mode** — special characters are typed as-is
+- **Always use `--stdin` for agent messages** — avoids all shell quoting issues
+- **Target panes must be in normal input mode** — copy-mode/search/jump prompts are rejected before sending
 - **`read` defaults to 50 lines** — pass a higher number for more context
 - **Non-agent panes** are the exception — you DO need to read them to see output
 - Use `capture-pane -p` to print to stdout (essential for scripting)
