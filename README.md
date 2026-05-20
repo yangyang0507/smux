@@ -42,7 +42,9 @@ Everything lives in `~/.smux/`.
 ## Update
 
 ```bash
-smux update
+smux update --check   # compare installed vs source
+smux update --dry-run  # preview changes
+smux update            # apply updates
 ```
 
 ## Uninstall
@@ -117,6 +119,7 @@ A CLI for cross-pane communication. Any tool that can run bash can use it — Cl
 | `tmux-bridge read <target> [lines]` | Read last N lines from a pane |
 | `tmux-bridge type <target> <text>` | Type text into a pane (no Enter) |
 | `tmux-bridge message <target> <text>` | Type a labeled cross-pane message (no Enter) |
+| `tmux-bridge file <target> <path>` | Stage a file and send the shared path to the target |
 | `tmux-bridge keys <target> <key>...` | Send keys (Enter, Escape, C-c, etc.) |
 | `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt |
 | `tmux-bridge name <target> <label>` | Label a pane for easy addressing |
@@ -134,6 +137,7 @@ smux stop  [-n <name>]
 smux attach [-n <name>]
 smux status
 smux status --agents
+smux update [--check] [--dry-run]
 smux doctor
 ```
 
@@ -150,6 +154,9 @@ smux doctor
 | `smux attach` | Re-attach to the session |
 | `smux status` | List all smux-managed sessions |
 | `smux status --agents` | List labeled panes for agent discovery |
+| `smux update` | Update installed files to latest |
+| `smux update --check` | Check for drift between source and installed files |
+| `smux update --dry-run` | Show what update would do without changing files |
 | `smux doctor` | Diagnose tmux, config, project layout, and sessions |
 
 `.smux` syntax:
@@ -160,6 +167,15 @@ smux doctor
 
 cmd | writer codex, tester "npm test | grep skip" | reviewer claude
 ```
+
+## Tab Completion
+
+```bash
+source ~/.smux/completions/tmux-bridge.bash  # tmux-bridge <tab> → subcommands, pane labels
+source ~/.smux/completions/smux.bash          # smux <tab> → subcommands, session names
+```
+
+Add to `~/.bashrc` or `~/.zshrc` for automatic loading. `smux doctor` checks completion status.
 
 ## Requirements
 
