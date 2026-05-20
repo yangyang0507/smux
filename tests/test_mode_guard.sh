@@ -61,4 +61,47 @@ else
   fail "require_normal_mode should pass after exiting copy-mode"
 fi
 
+# ---- CLI integration: type/message/keys reject copy-mode ----
+CLI="$SCRIPT_DIR/../scripts/tmux-bridge"
+
+test_name "CLI: type rejects copy-mode pane"
+# Exit copy-mode for baseline
+tmux send-keys -t "$TEST_PANE" Escape; sleep 0.1
+# Normal mode: should succeed
+scripts/tmux-bridge read "$TEST_PANE" 3 >/dev/null 2>&1
+if "$CLI" type "$TEST_PANE" 'test' 2>/dev/null; then
+  echo -e "    ${GREEN}OK (normal mode)${NC}"
+  ((++ASSERT_PASSED))
+else
+  fail "CLI type should succeed in normal mode"
+fi
+
+# Enter copy-mode
+tmux copy-mode -t "$TEST_PANE"; sleep 0.1
+
+# Copy-mode: type should be rejected (read guard still satisfied from above
+# since the failed normal-mode send cleared it; re-read first)
+scripts/tmux-bridge read "$TEST_PANE" 3 >/dev/null 2>&1
+if "$CLI" type "$TEST_PANE" 'test' 2>/dev/null; then
+  fail "CLI type should reject copy-mode"
+else
+  echo -e "    ${GREEN}OK (type rejected)${NC}"
+  ((++ASSERT_PASSED))
+fi
+
+test_name "CLI: keys rejects copy-mode pane"
+if "$CLI" keys "$TEST_PANE" Enter 2>/dev/null; then
+  fail "CLI keys should reject copy-mode"
+else
+  echo -e "    ${GREEN}OK (keys rejected)${NC}"
+  ((++ASSERT_PASSED))
+fi
+
+test_name "CLI: error message is user-friendly"
+err=$("$CLI" type "$TEST_PANE" 'test' 2>&1 || true)
+assert_contains "$err" "Press Escape/q"
+
+# Cleanup: exit copy-mode
+tmux send-keys -t "$TEST_PANE" Escape; sleep 0.1
+
 summary

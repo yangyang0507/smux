@@ -28,11 +28,11 @@ run_one "$SCRIPT_DIR/test_parse_text.sh"
 run_one "$SCRIPT_DIR/test_read_guard.sh"
 run_one "$SCRIPT_DIR/test_roundtrip.sh"
 
-# Mode guard test requires tmux — skip if not in tmux
-if [[ -n "${TMUX:-}" ]]; then
+# Mode guard test creates its own tmux session — only needs tmux binary
+if command -v tmux &>/dev/null; then
   run_one "$SCRIPT_DIR/test_mode_guard.sh"
 else
-  echo "[test_mode_guard.sh] SKIPPED (not in tmux)"
+  echo "[test_mode_guard.sh] SKIPPED (tmux not installed)"
   echo ""
 fi
 

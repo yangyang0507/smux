@@ -60,6 +60,24 @@ assert_ok() {
   fi
 }
 
+fail() {
+  echo -e "    ${RED}FAIL${NC}: $*"
+  ((++ASSERT_FAILED))
+}
+
+# Assert that a command returns non-zero (expected to fail)
+assert_fail() {
+  local desc="${1:-command should fail}"
+  shift
+  if "$@"; then
+    echo -e "    ${RED}FAIL${NC}: $desc unexpectedly succeeded"
+    ((++ASSERT_FAILED))
+  else
+    echo -e "    ${GREEN}OK${NC}"
+    ((++ASSERT_PASSED))
+  fi
+}
+
 summary() {
   local total=$((ASSERT_PASSED + ASSERT_FAILED))
   echo ""
