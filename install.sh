@@ -343,7 +343,8 @@ require_smux_session() {
 layout_line() {
   local file="$1" line clean found="" count=0
   while IFS= read -r line || [[ -n "$line" ]]; do
-    clean=$(trim "$line")
+    clean=$(strip_inline_comment "$line")
+    clean=$(trim "$clean")
     [[ -z "$clean" || "${clean:0:1}" == "#" ]] && continue
     (( count += 1 ))
     [[ $count -eq 1 ]] || error ".smux has multiple layout lines. .smux requires exactly one layout line."
@@ -351,6 +352,33 @@ layout_line() {
   done < "$file"
   [[ -n "$found" ]] || error ".smux is empty. .smux requires exactly one layout line. Run 'smux init' for examples."
   echo "$found"
+}
+
+strip_inline_comment() {
+  local s="$1" inq=0 esc=0 buf="" ch i
+  for (( i=0; i<${#s}; i++ )); do
+    ch="${s:i:1}"
+    if (( esc )); then
+      buf="${buf}${ch}"
+      esc=0
+      continue
+    fi
+    if [[ "$ch" == "\\" && $inq -eq 1 ]]; then
+      buf="${buf}${ch}"
+      esc=1
+      continue
+    fi
+    if [[ "$ch" == '"' ]]; then
+      (( inq = 1 - inq ))
+      buf="${buf}${ch}"
+      continue
+    fi
+    if [[ "$ch" == "#" && $inq -eq 0 ]]; then
+      break
+    fi
+    buf="${buf}${ch}"
+  done
+  printf '%s' "$buf"
 }
 
 # Quote-aware string splitter.
@@ -593,8 +621,10 @@ start_layout() {
   # --- Phase 3: label and launch ---
   for (( idx=0; idx<PANE_COUNT; idx++ )); do
     pane="${PANE_IDS[$idx]}"
-    tmux set-option -p -t "$pane" @smux_label "${PANE_LABELS[$idx]}" >/dev/null
-    tmux set-option -p -t "$pane" @name "${PANE_LABELS[$idx]}" >/dev/null
+    if [[ -n "${PANE_LABELS[$idx]}" ]]; then
+      tmux set-option -p -t "$pane" @smux_label "${PANE_LABELS[$idx]}" >/dev/null
+      tmux set-option -p -t "$pane" @name "${PANE_LABELS[$idx]}" >/dev/null
+    fi
     send_command_to_pane "$pane" "${PANE_COMMANDS[$idx]}"
   done
   (( detached )) || {
@@ -813,7 +843,37 @@ cmd_attach() {
 }
 
 cmd_status() {
+  local agents=0
+  while (($#)); do
+    case "$1" in
+      --agents) agents=1; shift ;;
+      --help|-h)
+        cat <<'EOF'
+Usage: smux status [--agents]
+
+  --agents  List agent panes with labels, pane IDs, commands, and working dirs
+EOF
+        return 0 ;;
+      *) error "Unknown status option: $1" ;;
+    esac
+  done
   command -v tmux >/dev/null 2>&1 || error "tmux not found."
+  if (( agents )); then
+    printf "%-12s %-8s %-16s %-22s %s\n" "SESSION" "PANE" "LABEL" "COMMAND" "CWD"
+    { tmux list-sessions -F '#{session_name}|#{@smux_project}' 2>/dev/null || true; } |
+    while IFS='|' read -r session project; do
+      [[ -n "$project" ]] || continue
+      tmux list-panes -t "$session" \
+        -F '#{session_name}|#{pane_id}|#{@name}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null |
+      while IFS='|' read -r sess pane label command cwd; do
+        [[ -n "$label" ]] || continue
+        cwd="${cwd/#$HOME/~}"
+        printf "%-12s %-8s %-16s %-22s %s\n" "$sess" "$pane" "$label" "$command" "$cwd"
+      done
+    done
+    return 0
+  fi
+
   printf "%-12s %-28s %-7s %s\n" "SESSION" "PROJECT" "PANES" "LABELS"
   { tmux list-sessions -F '#{session_name}|#{@smux_project}' 2>/dev/null || true; } |
   while IFS='|' read -r session project; do
@@ -856,6 +916,7 @@ Syntax:
   LABEL            empty shell pane (e.g. `cmd`)
   |                split columns
   ,                stack within column
+  #                full-line or inline comment outside double quotes
 
   Tip: `cmd` is just a label, not a required keyword.
 
@@ -1047,7 +1108,7 @@ Commands:
   start       Start a .smux tmux workspace
   stop        Stop a smux-managed session
   attach      Attach to a session
-  status      List smux-managed sessions
+  status      List smux-managed sessions or agent panes
   doctor      Diagnose smux and tmux setup
   version     Print version
   help        Show this help
@@ -1057,6 +1118,7 @@ Workspace:
   smux start [-n <name>] [-d] [--replace] [--dry-run] [--preview]
   smux stop  [-n <name>]
   smux attach [-n <name>]
+  smux status [--agents]
   smux update [--check] [--dry-run]
 
 Files:

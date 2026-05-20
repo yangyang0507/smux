@@ -30,9 +30,11 @@ run_one "$SCRIPT_DIR/test_roundtrip.sh"
 
 # Integration tests create their own tmux sessions — only need tmux binary
 if command -v tmux &>/dev/null; then
+  run_one "$SCRIPT_DIR/test_smux_workspace.sh"
   run_one "$SCRIPT_DIR/test_mode_guard.sh"
   run_one "$SCRIPT_DIR/test_file_transfer.sh"
 else
+  echo "[test_smux_workspace.sh] SKIPPED (tmux not installed)"
   echo "[test_mode_guard.sh] SKIPPED (tmux not installed)"
   echo "[test_file_transfer.sh] SKIPPED (tmux not installed)"
   echo ""

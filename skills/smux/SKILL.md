@@ -17,6 +17,7 @@ Define a multi-pane tmux workspace with a `.smux` file and launch it with one co
 .smux syntax:
   | split columns     , stack within column
   Each cell: LABEL COMMAND (or just LABEL for empty shell pane)
+  # starts an inline comment outside double quotes
 
   cmd | writer codex, tester "npm test | grep skip" | reviewer claude
 ```
@@ -34,6 +35,7 @@ Define a multi-pane tmux workspace with a `.smux` file and launch it with one co
 | `smux stop` | Kill the smux-managed session |
 | `smux attach` | Re-attach to the session |
 | `smux status` | List all smux-managed sessions |
+| `smux status --agents` | List labeled agent panes with pane IDs |
 | `smux doctor` | Diagnose tmux, config, project layout, and sessions |
 
 ## tmux-bridge — Cross-Pane Communication

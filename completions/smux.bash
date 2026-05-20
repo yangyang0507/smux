@@ -49,6 +49,9 @@ _smux_complete() {
         COMPREPLY=( $(compgen -W "-n" -- "$cur") )
       fi
       ;;
+    status)
+      COMPREPLY=( $(compgen -W "--agents" -- "$cur") )
+      ;;
   esac
 }
 

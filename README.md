@@ -132,6 +132,7 @@ smux start [-n <name>] [-d] [--replace] [--dry-run] [--preview]
 smux stop  [-n <name>]
 smux attach [-n <name>]
 smux status
+smux status --agents
 smux doctor
 ```
 
@@ -147,12 +148,14 @@ smux doctor
 | `smux stop` | Kill the smux-managed session |
 | `smux attach` | Re-attach to the session |
 | `smux status` | List all smux-managed sessions |
+| `smux status --agents` | List labeled panes for agent discovery |
 | `smux doctor` | Diagnose tmux, config, project layout, and sessions |
 
 `.smux` syntax:
 ```
 # | split columns     , stack within column
 # Each cell: LABEL COMMAND (or just LABEL for empty shell pane)
+# # starts an inline comment outside double quotes
 
 cmd | writer codex, tester "npm test | grep skip" | reviewer claude
 ```

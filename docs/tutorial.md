@@ -112,6 +112,7 @@ Create a `.smux` file in your project root:
 # .smux
 # | split columns     , stack within column
 # Each cell: LABEL COMMAND (or just LABEL for empty shell)
+# # starts an inline comment outside double quotes
 
 cmd | writer codex, tester npm test | reviewer claude
 ```
@@ -147,7 +148,7 @@ LABEL COMMAND        pane with a command (first word = label, rest = command)
 LABEL                empty shell pane (no command)
 |                    split new column to the right
 ,                    stack new pane below in the same column
-#                    comment line
+#                    full-line or inline comment outside double quotes
 ```
 
 **Examples:**
@@ -185,6 +186,7 @@ runner "make test | grep -v skip"    # | inside quotes is part of the command
 | `smux stop` | Kill the smux session |
 | `smux attach` | Re-attach to existing session |
 | `smux status` | List all smux-managed sessions |
+| `smux status --agents` | List labeled panes for agent discovery |
 | `smux init` | Print DSL help and example layouts |
 | `smux init '<layout>'` | Write `.smux` from a layout string |
 | `smux doctor` | Diagnose tmux and smux state |
@@ -224,6 +226,7 @@ smux attach
 
 # 7. Check what's running
 smux status
+smux status --agents
 
 # 8. Done for the day
 smux stop
