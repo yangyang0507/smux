@@ -2,7 +2,7 @@
 # smux — one-command tmux setup
 set -euo pipefail
 
-VERSION="2.1.0"
+VERSION="2.2.0"
 REPO="yangyang0507/smux"
 BRANCH="main"
 BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
