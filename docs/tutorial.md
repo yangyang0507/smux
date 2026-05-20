@@ -187,6 +187,9 @@ runner "make test | grep -v skip"    # | inside quotes is part of the command
 | `smux attach` | Re-attach to existing session |
 | `smux status` | List all smux-managed sessions |
 | `smux status --agents` | List labeled panes for agent discovery |
+| `smux update` | Update smux to latest version |
+| `smux update --check` | Compare installed files with source (checksum) |
+| `smux update --dry-run` | Show what would be installed without writing |
 | `smux init` | Print DSL help and example layouts |
 | `smux init '<layout>'` | Write `.smux` from a layout string |
 | `smux doctor` | Diagnose tmux and smux state |
@@ -228,7 +231,11 @@ smux attach
 smux status
 smux status --agents
 
-# 8. Done for the day
+# 8. Keep smux up to date
+smux update --check
+smux update
+
+# 9. Done for the day
 smux stop
 ```
 
@@ -246,6 +253,7 @@ tmux-bridge lets AI agents (or any process) talk to each other across tmux panes
 | `tmux-bridge read <target> [n]` | Read last n lines from a pane (default 50) |
 | `tmux-bridge type <target> <text>` | Type text into a pane (no Enter pressed) |
 | `tmux-bridge message <target> <text>` | Type a labeled message with sender info |
+| `tmux-bridge file <target> <path>` | Stage a file and send the shared path to the target |
 | `tmux-bridge keys <target> <key>` | Send a special key (Enter, Escape, C-c, etc.) |
 | `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt |
 | `tmux-bridge name <target> <label>` | Label a pane for easy addressing |
@@ -348,6 +356,26 @@ tmux-bridge keys %4 Enter
 
 **Claude receives the reply directly in its pane.** No polling. No waiting.
 
+### Sending Long Content (diffs, logs, reports)
+
+For long content, use `file` instead of `type` or `message`. It stages the content to a temp file and sends only a short shared path to the target pane:
+
+```bash
+tmux-bridge read codex 20
+git diff > /tmp/review.diff
+tmux-bridge file codex /tmp/review.diff
+tmux-bridge read codex 20
+tmux-bridge keys codex Enter
+```
+
+Or pipe directly from stdin:
+
+```bash
+git diff | tmux-bridge file codex --stdin --name review.diff
+```
+
+The target agent reads the staged file at the shared path. By default, content is capped at 262144 bytes / 2000 lines; override with `--max-bytes` / `--max-lines`.
+
 ### Talking to Non-Agent Panes
 
 If the target pane is a plain shell or running process (no agent that will reply), you DO need to read after sending to see the result:
@@ -359,6 +387,45 @@ tmux-bridge read worker 10        # verify
 tmux-bridge keys worker Enter     # submit
 tmux-bridge read worker 20        # read the result
 ```
+
+---
+
+## Part 4: Maintenance
+
+### Updating smux
+
+Check whether your installed files match the latest source:
+
+```bash
+smux update --check
+```
+
+Preview what would change:
+
+```bash
+smux update --dry-run
+```
+
+Apply updates:
+
+```bash
+smux update
+```
+
+`smux doctor` also checks for file drift and prompts you to run `smux update --check` if needed.
+
+### Tab Completion
+
+smux ships with bash completion for both CLI tools. To enable:
+
+```bash
+source ~/.smux/completions/tmux-bridge.bash
+source ~/.smux/completions/smux.bash
+```
+
+Add those lines to `~/.bashrc` or `~/.zshrc` to load automatically. `smux doctor` checks completion status and prompts if not loaded.
+
+Completions cover: subcommands, pane labels (`tmux-bridge type <tab>`), session names (`smux attach -n <tab>`), key names, and flags.
 
 ---
 
@@ -384,7 +451,8 @@ tmux-bridge read worker 20        # read the result
 | `smux start --preview` | Preview layout |
 | `smux stop` | Kill session |
 | `smux attach` | Reattach |
-| `smux status` | List sessions |
+| `smux status [--agents]` | List sessions / agent panes |
+| `smux update [--check\|--dry-run]` | Update or compare installed files |
 | `smux init` | Show DSL help |
 | `smux doctor` | Diagnostics |
 
@@ -396,5 +464,7 @@ tmux-bridge read worker 20        # read the result
 | `tmux-bridge read <t> [n]` | Read n lines |
 | `tmux-bridge message <t> <text>` | Send labeled message |
 | `tmux-bridge type <t> <text>` | Type text |
+| `tmux-bridge file <t> <path>` | Stage file, send shared path |
 | `tmux-bridge keys <t> <key>` | Send key |
+| `tmux-bridge wake <t>` | Escape from copy-mode/prompt |
 | `tmux-bridge name <t> <label>` | Label pane |
