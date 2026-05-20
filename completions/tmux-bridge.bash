@@ -30,7 +30,7 @@ _tmux_bridge_complete() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local commands="list type message msg read keys name resolve id doctor version help"
+  local commands="list type message msg file read keys name resolve id doctor version help"
 
   if (( COMP_CWORD == 1 )); then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -39,13 +39,15 @@ _tmux_bridge_complete() {
 
   cmd="${COMP_WORDS[1]}"
   case "$cmd" in
-    type|message|msg|read|keys|name)
+    type|message|msg|file|read|keys|name)
       if (( COMP_CWORD == 2 )); then
         COMPREPLY=( $(compgen -W "$(_tmux_bridge_targets)" -- "$cur") )
       elif [[ "$cmd" == "keys" ]]; then
         COMPREPLY=( $(compgen -W "$(_tmux_bridge_keys)" -- "$cur") )
       elif [[ "$prev" != "--" && ( "$cmd" == "type" || "$cmd" == "message" || "$cmd" == "msg" ) ]]; then
         COMPREPLY=( $(compgen -W "--stdin --base64 --" -- "$cur") )
+      elif [[ "$prev" != "--" && "$cmd" == "file" ]]; then
+        COMPREPLY=( $(compgen -W "--stdin --name --max-bytes --max-lines --" -- "$cur") )
       fi
       ;;
     resolve)

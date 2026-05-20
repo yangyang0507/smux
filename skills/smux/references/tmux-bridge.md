@@ -91,7 +91,21 @@ Shell quoting is fundamentally fragile for AI-generated text. Single quotes (`'.
 
 `--stdin` and `--base64` only protect the shell-to-`tmux-bridge` transport. `tmux-bridge` still types into a live terminal pane, so the target pane must be in normal input mode. If the target is in tmux copy-mode, search, jump, or another tmux prompt, `type`, `message`, and `keys` fail instead of injecting text into the wrong mode. Press `Escape` or `q` in that pane, then retry.
 
-Keep agent-to-agent messages short and preferably single-line. For long diffs, logs, or reports, write the content to a file and send the path or a concise summary.
+Keep agent-to-agent messages short and preferably single-line. For long diffs, logs, or reports, use `file` so tmux-bridge stages the content and sends only a shared path:
+
+```bash
+tmux-bridge read codex 20
+git diff > /tmp/review.diff
+tmux-bridge file codex /tmp/review.diff
+tmux-bridge read codex 20
+tmux-bridge keys codex Enter
+```
+
+```bash
+git diff | tmux-bridge file codex --stdin --name review.diff
+```
+
+`file` truncates staged content by default at 262144 bytes or 2000 lines and appends a truncation notice. Override with `--max-bytes <n>` or `--max-lines <n>`.
 
 ## Command Reference
 
@@ -100,6 +114,7 @@ Keep agent-to-agent messages short and preferably single-line. For long diffs, l
 | `tmux-bridge list` | Show all panes with target, pid, command, size, label | `tmux-bridge list` |
 | `tmux-bridge type <target> [flags] [text...]` | Type text without pressing Enter | `printf '%s' "$msg" \| tmux-bridge type codex --stdin` |
 | `tmux-bridge message <target> [flags] [text...]` | Type text with auto sender info and reply target | `printf '%s' "$msg" \| tmux-bridge message codex --stdin` |
+| `tmux-bridge file <target> [flags] <path>` | Stage file/stdin content and send the shared path | `tmux-bridge file codex ./diff.txt` |
 | `tmux-bridge read <target> [lines]` | Read last N lines (default 50) | `tmux-bridge read codex 100` |
 | `tmux-bridge keys <target> <key>...` | Send special keys | `tmux-bridge keys codex Enter` |
 | `tmux-bridge name <target> <label>` | Label a pane (visible in tmux border) | `tmux-bridge name %3 codex` |
@@ -257,6 +272,7 @@ tmux-bridge keys codex Enter
 - **Never wait or poll** — agent panes reply to you via tmux-bridge. The response appears in YOUR pane.
 - **Label panes early** — it makes cross-agent communication much easier than using `%N` IDs
 - **Always use `--stdin` for agent messages** — avoids all shell quoting issues
+- **Use `file` for long diffs/logs/reports** — it sends a shared temp-file path, not raw content
 - **Target panes must be in normal input mode** — copy-mode/search/jump prompts are rejected before sending
 - **`type` uses literal mode** — it uses `-l` so special characters are typed as-is
 - **`message` auto-prepends sender info** — preferred over `type` for agent-to-agent communication
