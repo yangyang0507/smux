@@ -12,10 +12,9 @@ _tmux_bridge_timeout() {
 
 _tmux_bridge_targets() {
   command -v tmux >/dev/null 2>&1 || return 0
-  {
-    _tmux_bridge_timeout tmux list-panes -a -F '#{pane_id}'
-    _tmux_bridge_timeout tmux list-panes -a -F '#{@name}'
-  } | awk 'NF' | sort -u
+  _tmux_bridge_timeout tmux list-panes -a -F '#{pane_id} #{@name}' \
+    | awk '{ print $1; if ($2 != "") print $2 }' \
+    | sort -u
 }
 
 _tmux_bridge_keys() {
@@ -45,7 +44,7 @@ _tmux_bridge_complete() {
         COMPREPLY=( $(compgen -W "$(_tmux_bridge_targets)" -- "$cur") )
       elif [[ "$cmd" == "keys" ]]; then
         COMPREPLY=( $(compgen -W "$(_tmux_bridge_keys)" -- "$cur") )
-      elif [[ "$cmd" == "type" || "$cmd" == "message" || "$cmd" == "msg" ]]; then
+      elif [[ "$prev" != "--" && ( "$cmd" == "type" || "$cmd" == "message" || "$cmd" == "msg" ) ]]; then
         COMPREPLY=( $(compgen -W "--stdin --base64 --" -- "$cur") )
       fi
       ;;
