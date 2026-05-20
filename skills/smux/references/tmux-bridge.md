@@ -89,7 +89,7 @@ If text is omitted entirely and stdin is piped (non-TTY), stdin is auto-read.
 
 Shell quoting is fundamentally fragile for AI-generated text. Single quotes (`'...'`) work for simple human messages but fail when the message itself contains `'`. Double quotes (`"..."`) expose `$` and `!` to shell expansion. For agents, always prefer stdin.
 
-`--stdin` and `--base64` only protect the shell-to-`tmux-bridge` transport. `tmux-bridge` still types into a live terminal pane, so the target pane must be in normal input mode. If the target is in tmux copy-mode, search, jump, or another tmux prompt, `type`, `message`, and `keys` fail instead of injecting text into the wrong mode. Press `Escape` or `q` in that pane, then retry.
+`--stdin` and `--base64` only protect the shell-to-`tmux-bridge` transport. `tmux-bridge` still types into a live terminal pane, so the target pane must be in normal input mode. If the target is in tmux copy-mode, search, jump, or another tmux prompt, `type`, `message`, and `keys` fail instead of injecting text into the wrong mode. Use `tmux-bridge wake <target>` only when you explicitly want to send `Escape` to that pane and interrupt its current tmux mode/prompt.
 
 Keep agent-to-agent messages short and preferably single-line. For long diffs, logs, or reports, use `file` so tmux-bridge stages the content and sends only a shared path:
 
@@ -117,6 +117,7 @@ git diff | tmux-bridge file codex --stdin --name review.diff
 | `tmux-bridge file <target> [flags] <path>` | Stage file/stdin content and send the shared path | `tmux-bridge file codex ./diff.txt` |
 | `tmux-bridge read <target> [lines]` | Read last N lines (default 50) | `tmux-bridge read codex 100` |
 | `tmux-bridge keys <target> <key>...` | Send special keys | `tmux-bridge keys codex Enter` |
+| `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt | `tmux-bridge wake codex` |
 | `tmux-bridge name <target> <label>` | Label a pane (visible in tmux border) | `tmux-bridge name %3 codex` |
 | `tmux-bridge resolve <label>` | Print pane target for a label | `tmux-bridge resolve codex` |
 | `tmux-bridge id` | Print this pane's ID | `tmux-bridge id` |
@@ -274,6 +275,7 @@ tmux-bridge keys codex Enter
 - **Always use `--stdin` for agent messages** — avoids all shell quoting issues
 - **Use `file` for long diffs/logs/reports** — it sends a shared temp-file path, not raw content
 - **Target panes must be in normal input mode** — copy-mode/search/jump prompts are rejected before sending
+- **Use `wake` deliberately** — it sends `Escape` to the target pane and may interrupt scrollback/search
 - **`type` uses literal mode** — it uses `-l` so special characters are typed as-is
 - **`message` auto-prepends sender info** — preferred over `type` for agent-to-agent communication
 - **`read` defaults to 50 lines** — pass a higher number for more context

@@ -1088,6 +1088,19 @@ cmd_doctor() {
     done < <(tmux list-sessions -F '#{session_name}|#{@smux_project}' 2>/dev/null)
     (( found )) || doctor_info "smux sessions: none"
   fi
+
+  if command -v tmux >/dev/null 2>&1 && tmux list-sessions >/dev/null 2>&1; then
+    local mode_found=0 mode_sess mode_project mode_pane mode_label mode_state
+    while IFS='|' read -r mode_sess mode_project; do
+      [[ -n "$mode_project" ]] || continue
+      while IFS='|' read -r mode_pane mode_label mode_state; do
+        [[ "$mode_state" == "1" ]] || continue
+        mode_found=1
+        doctor_warn "pane ${mode_label:-$mode_pane} ($mode_pane) is in tmux mode/prompt. Run: tmux-bridge wake $mode_pane"
+      done < <(tmux list-panes -t "$mode_sess" -F '#{pane_id}|#{@name}|#{pane_in_mode}' 2>/dev/null)
+    done < <(tmux list-sessions -F '#{session_name}|#{@smux_project}' 2>/dev/null)
+    (( mode_found )) || doctor_ok "smux panes are in normal input mode"
+  fi
 }
 
 cmd_version() {

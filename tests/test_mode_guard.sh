@@ -48,7 +48,7 @@ fi
 # ---- error message contains hint ----
 test_name "require_normal_mode error message has Escape/q hint"
 err=$(require_normal_mode "$TEST_PANE" 2>&1 || true)
-assert_contains "$err" "Press Escape/q"
+assert_contains "$err" "tmux-bridge wake"
 
 # ---- back to normal mode passes ----
 test_name "require_normal_mode passes after exiting copy-mode"
@@ -99,7 +99,23 @@ fi
 
 test_name "CLI: error message is user-friendly"
 err=$("$CLI" type "$TEST_PANE" 'test' 2>&1 || true)
-assert_contains "$err" "Press Escape/q"
+assert_contains "$err" "tmux-bridge wake"
+
+test_name "CLI: wake returns ok in normal mode"
+tmux send-keys -t "$TEST_PANE" Escape; sleep 0.1
+out=$("$CLI" wake "$TEST_PANE")
+assert_contains "$out" "already in normal mode"
+
+test_name "CLI: wake exits copy-mode"
+tmux copy-mode -t "$TEST_PANE"; sleep 0.1
+out=$("$CLI" wake "$TEST_PANE")
+assert_contains "$out" "returned to normal mode"
+if require_normal_mode "$TEST_PANE" 2>/dev/null; then
+  echo -e "    ${GREEN}OK (normal after wake)${NC}"
+  ((++ASSERT_PASSED))
+else
+  fail "wake should return pane to normal mode"
+fi
 
 # Cleanup: exit copy-mode
 tmux send-keys -t "$TEST_PANE" Escape; sleep 0.1

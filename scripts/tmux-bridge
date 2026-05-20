@@ -124,6 +124,7 @@ Commands:
                             Stage file/stdin content and send a short file notice
   read <target> [lines]     Read last N lines from pane (default: 50)
   keys <target> <key>...    Send special keys (Enter, Escape, C-c, etc.)
+  wake <target>             Send Escape once if target is in tmux mode/prompt
   name <target> <label>     Label a pane (visible in tmux border)
   resolve <label>           Print pane target for a label
   id                        Print this pane's ID ($TMUX_PANE)
@@ -199,12 +200,17 @@ validate_target() {
     || die "invalid target: $target"
 }
 
+pane_in_mode() {
+  local target="$1"
+  tmx display-message -t "$target" -p '#{pane_in_mode}' 2>/dev/null || echo 0
+}
+
 require_normal_mode() {
   local target="$1"
   local in_mode
-  in_mode=$(tmx display-message -t "$target" -p '#{pane_in_mode}' 2>/dev/null || echo 0)
+  in_mode=$(pane_in_mode "$target")
   if [[ "$in_mode" != "0" ]]; then
-    die "target pane is in tmux copy-mode or a tmux prompt. Press Escape/q in that pane, then retry."
+    die "target pane is in tmux copy-mode or a tmux prompt. Run: tmux-bridge wake $target"
   fi
 }
 
@@ -518,6 +524,32 @@ cmd_keys() {
   clear_read "$target"
 }
 
+cmd_wake() {
+  require_args 1 $# "wake"
+  require_tmux
+  local target in_mode i
+  target=$(resolve_target "$1")
+  validate_target "$target"
+
+  in_mode=$(pane_in_mode "$target")
+  if [[ "$in_mode" == "0" ]]; then
+    echo "ok: target pane is already in normal mode"
+    return 0
+  fi
+
+  tmx send-keys -t "$target" Escape
+  for (( i=0; i<5; i++ )); do
+    sleep 0.1
+    in_mode=$(pane_in_mode "$target")
+    if [[ "$in_mode" == "0" ]]; then
+      echo "ok: target pane returned to normal mode"
+      return 0
+    fi
+  done
+
+  die "target pane did not leave tmux mode after Escape. Press Escape/q in that pane manually, then retry."
+}
+
 cmd_name() {
   require_args 2 $# "name"
   require_tmux
@@ -637,6 +669,7 @@ case "$1" in
   file)    shift; cmd_file "$@" ;;
   read)    shift; cmd_read "$@" ;;
   keys)    shift; cmd_keys "$@" ;;
+  wake)    shift; cmd_wake "$@" ;;
   name)    shift; cmd_name "$@" ;;
   resolve) shift; cmd_resolve "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;

@@ -247,6 +247,7 @@ tmux-bridge lets AI agents (or any process) talk to each other across tmux panes
 | `tmux-bridge type <target> <text>` | Type text into a pane (no Enter pressed) |
 | `tmux-bridge message <target> <text>` | Type a labeled message with sender info |
 | `tmux-bridge keys <target> <key>` | Send a special key (Enter, Escape, C-c, etc.) |
+| `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt |
 | `tmux-bridge name <target> <label>` | Label a pane for easy addressing |
 | `tmux-bridge resolve <label>` | Find a pane by label |
 | `tmux-bridge id` | Print current pane's ID |

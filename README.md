@@ -118,6 +118,7 @@ A CLI for cross-pane communication. Any tool that can run bash can use it — Cl
 | `tmux-bridge type <target> <text>` | Type text into a pane (no Enter) |
 | `tmux-bridge message <target> <text>` | Type a labeled cross-pane message (no Enter) |
 | `tmux-bridge keys <target> <key>...` | Send keys (Enter, Escape, C-c, etc.) |
+| `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt |
 | `tmux-bridge name <target> <label>` | Label a pane for easy addressing |
 | `tmux-bridge resolve <label>` | Look up a pane by label |
 | `tmux-bridge id` | Print this pane's ID |
