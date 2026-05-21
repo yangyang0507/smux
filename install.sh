@@ -11,7 +11,6 @@ BIN_DIR="$SMUX_DIR/bin"
 COMPLETION_DIR="$SMUX_DIR/completions"
 BACKUP_DIR="$SMUX_DIR/backups"
 TMUX_XDG_DIR="$HOME/.config/tmux"
-SKILL_DIR="$HOME/.agents/skills/smux"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -202,9 +201,6 @@ scripts/tmux-bridge|$BIN_DIR/tmux-bridge|755
 install.sh|$BIN_DIR/smux|755
 completions/tmux-bridge.bash|$COMPLETION_DIR/tmux-bridge.bash|644
 completions/smux.bash|$COMPLETION_DIR/smux.bash|644
-skills/smux/SKILL.md|$SKILL_DIR/SKILL.md|644
-skills/smux/references/tmux.md|$SKILL_DIR/references/tmux.md|644
-skills/smux/references/tmux-bridge.md|$SKILL_DIR/references/tmux-bridge.md|644
 EOF
 }
 
@@ -660,7 +656,7 @@ cmd_install() {
   fi
 
   # 3. Create directories
-  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$COMPLETION_DIR" "$BACKUP_DIR" "$SKILL_DIR/references"
+  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$COMPLETION_DIR" "$BACKUP_DIR"
 
   # 4. Back up existing config
   backup_existing
@@ -697,6 +693,9 @@ cmd_install() {
   echo ""
   echo "  To enable tab completion, add to your shell rc:"
   completion_source_hint | sed 's/^/    /'
+  echo ""
+  echo "  To install smux as an agent skill:"
+  echo "    npx skills add yangyang0507/smux"
 }
 
 cmd_update() {
@@ -730,7 +729,7 @@ EOF
     return 0
   fi
 
-  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$COMPLETION_DIR" "$BACKUP_DIR" "$SKILL_DIR/references"
+  mkdir -p "$SMUX_DIR" "$BIN_DIR" "$COMPLETION_DIR" "$BACKUP_DIR"
   backup_existing
 
   install_manifest_files 0
@@ -738,6 +737,9 @@ EOF
   if tmux list-sessions &>/dev/null; then
     tmux source-file "$SMUX_DIR/tmux.conf" 2>/dev/null && info "Reloaded tmux config." || true
   fi
+
+  echo ""
+  info "To update the smux agent skill: npx skills add yangyang0507/smux"
 
   info "Update complete. Restarting..."
   exec "$BIN_DIR/smux" version
