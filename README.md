@@ -5,15 +5,14 @@ One-command tmux setup with terminal automation for AI agents.
 - **For you** — keyboard-driven tmux config with Option-key bindings, mouse support, and pane labels
 - **For agents** — `tmux-bridge` CLI lets any agent read, type, and send keys to any pane
 - **Agent-to-agent** — Claude Code can prompt Codex in the next pane, and Codex replies back. Any agent that can run bash can participate.
+- **Agent pipeline** — define multi-step workflows in `.smux` (A → B → C), agents call `tmux-bridge flow step` to chain output
 - **Declarative workspace** — define pane layout + startup commands in `.smux`, launch with one command
 
 📖 **[smux Tutorial](docs/tutorial.md)** — complete guide covering tmux, smux, and tmux-bridge
 
 ```bash
 tmux-bridge read codex 20
-tmux-bridge message codex 'review src/auth.ts'
-tmux-bridge read codex 20          # verify text landed
-tmux-bridge keys codex Enter
+tmux-bridge message codex --enter 'review src/auth.ts'
 ```
 
 ## Quick Start
@@ -118,15 +117,38 @@ A CLI for cross-pane communication. Any tool that can run bash can use it — Cl
 | `tmux-bridge list` | Show all panes with target, process, label |
 | `tmux-bridge read <target> [lines]` | Read last N lines from a pane |
 | `tmux-bridge type <target> <text>` | Type text into a pane (no Enter) |
-| `tmux-bridge message <target> <text>` | Type a labeled cross-pane message (no Enter) |
+| `tmux-bridge message <target> <text>` | Type a labeled cross-pane message (use `--enter` to auto-submit) |
 | `tmux-bridge file <target> <path>` | Stage a file and send the shared path to the target |
 | `tmux-bridge keys <target> <key>...` | Send keys (Enter, Escape, C-c, etc.) |
+| `tmux-bridge flow step` | Submit current pipeline step and route to next agent |
 | `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt |
 | `tmux-bridge name <target> <label>` | Label a pane for easy addressing |
 | `tmux-bridge resolve <label>` | Look up a pane by label |
 | `tmux-bridge id` | Print this pane's ID |
 
 See the [smux skill](skills/smux/SKILL.md) for full documentation on agent-to-agent workflows.
+
+## Pipeline (Flow)
+
+Define agent workflows in `.smux` with a `pipeline:` block. Each step specifies which agent hands off to which:
+
+```
+cmd | writer codex, tester npm test | reviewer claude
+
+pipeline: review
+  steps:
+    writer -> tester   "Run tests on the changes and report results"
+    tester -> reviewer "Review the test results and code quality"
+```
+
+```bash
+smux flow start "Implement login with JWT auth"
+smux flow status                  # see progress
+smux flow reset                   # restart pipeline
+
+# Agents submit steps from within their panes:
+tmux-bridge flow step             # auto-starts pipeline if not running
+```
 
 ## Workspace Commands
 
@@ -137,6 +159,9 @@ smux stop  [-n <name>]
 smux attach [-n <name>]
 smux status
 smux status --agents
+smux flow start [--pipeline <name>] [message...]
+smux flow status
+smux flow reset [--pipeline <name>]
 smux update [--check] [--dry-run]
 smux doctor
 ```
@@ -157,6 +182,9 @@ smux doctor
 | `smux update` | Update installed files to latest |
 | `smux update --check` | Check for drift between source and installed files |
 | `smux update --dry-run` | Show what update would do without changing files |
+| `smux flow start [--pipeline <name>] [message...]` | Start an agent pipeline with an initial task |
+| `smux flow status` | Show pipeline steps and current progress |
+| `smux flow reset [--pipeline <name>]` | Reset pipeline to the first step |
 | `smux doctor` | Diagnose tmux, config, project layout, and sessions |
 
 `.smux` syntax:

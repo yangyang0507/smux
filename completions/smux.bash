@@ -52,6 +52,9 @@ _smux_complete() {
     status)
       COMPREPLY=( $(compgen -W "--agents" -- "$cur") )
       ;;
+    flow)
+      COMPREPLY=( $(compgen -W "start status reset" -- "$cur") )
+      ;;
   esac
 }
 

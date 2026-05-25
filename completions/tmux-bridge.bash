@@ -30,7 +30,7 @@ _tmux_bridge_complete() {
   cur="${COMP_WORDS[COMP_CWORD]}"
   prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-  local commands="list type message msg file read keys wake name resolve id doctor version help"
+  local commands="list type message msg file read keys flow wake name resolve id doctor version help"
 
   if (( COMP_CWORD == 1 )); then
     COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
@@ -57,3 +57,4 @@ _tmux_bridge_complete() {
 }
 
 complete -F _tmux_bridge_complete tmux-bridge
+mux-bridge
