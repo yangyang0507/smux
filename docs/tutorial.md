@@ -252,8 +252,8 @@ tmux-bridge lets AI agents (or any process) talk to each other across tmux panes
 | `tmux-bridge list` | Show all panes with label, process, and location |
 | `tmux-bridge read <target> [n]` | Read last n lines from a pane (default 50) |
 | `tmux-bridge type <target> <text>` | Type text into a pane (no Enter pressed) |
-| `tmux-bridge message <target> <text>` | Type a labeled message with sender info |
-| `tmux-bridge file <target> <path>` | Stage a file and send the shared path to the target |
+| `tmux-bridge message <target> <text>` | Type a labeled message with sender info. Use `--enter` to auto-submit |
+| `tmux-bridge file <target> <path>` | Stage a file and send the shared path to the target. Use `--brief` to omit the header when combining with `message` |
 | `tmux-bridge keys <target> <key>` | Send a special key (Enter, Escape, C-c, etc.) |
 | `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt |
 | `tmux-bridge name <target> <label>` | Label a pane for easy addressing |
@@ -277,6 +277,13 @@ Every interaction follows three steps:
 
 ```
 1. READ    tmux-bridge read <target>     # check the pane, satisfy guard
+2. ACT     tmux-bridge message <target> --enter  # type your message and auto-submit
+```
+
+Without `--enter`, message only types the text and you press Enter separately:
+
+```
+1. READ    tmux-bridge read <target>     # check the pane, satisfy guard
 2. ACT     tmux-bridge message <target>  # type your message (no Enter)
 3. READ    tmux-bridge read <target>     # verify the text landed
 4. ACT     tmux-bridge keys <target> Enter  # press Enter to submit
@@ -288,16 +295,19 @@ Every interaction follows three steps:
 # 1. Read the target pane
 tmux-bridge read codex 20
 
-# 2. Send a labeled message (auto-prepends sender info)
-tmux-bridge message codex 'Please review src/auth.ts'
-
-# 3. Verify the text appeared
-tmux-bridge read codex 20
-
-# 4. Press Enter to submit
-tmux-bridge keys codex Enter
+# 2. Send a labeled message and auto-submit with --enter
+tmux-bridge message codex --enter 'Please review src/auth.ts'
 
 # STOP. Do not poll or wait. The other agent will reply into YOUR pane.
+```
+
+Without `--enter`, you type first and press Enter as a separate step for verification:
+
+```bash
+tmux-bridge read codex 20
+tmux-bridge message codex 'Please review src/auth.ts'
+tmux-bridge read codex 20          # verify text landed
+tmux-bridge keys codex Enter       # submit
 ```
 
 The receiving agent sees:
@@ -314,9 +324,7 @@ When you see a `[tmux-bridge from:...]` message in your pane, reply using the **
 
 ```bash
 tmux-bridge read %4 20
-tmux-bridge message %4 '87% coverage. Missing OAuth refresh path (lines 142-168).'
-tmux-bridge read %4 20
-tmux-bridge keys %4 Enter
+tmux-bridge message %4 --enter '87% coverage. Missing OAuth refresh path (lines 142-168).'
 ```
 
 ### Full Conversation Example
@@ -335,9 +343,7 @@ tmux-bridge name "$(tmux-bridge id)" codex
 
 ```bash
 tmux-bridge read codex 20
-tmux-bridge message codex 'What does the auth middleware expect in the header?'
-tmux-bridge read codex 20
-tmux-bridge keys codex Enter
+tmux-bridge message codex --enter 'What does the auth middleware expect in the header?'
 ```
 
 **Codex sees:**
@@ -349,9 +355,7 @@ tmux-bridge keys codex Enter
 
 ```bash
 tmux-bridge read %4 20
-tmux-bridge message %4 'It expects Authorization: Bearer <token> and validates JWT expiry.'
-tmux-bridge read %4 20
-tmux-bridge keys %4 Enter
+tmux-bridge message %4 --enter 'It expects Authorization: Bearer <token> and validates JWT expiry.'
 ```
 
 **Claude receives the reply directly in its pane.** No polling. No waiting.
@@ -374,6 +378,14 @@ Or pipe directly from stdin:
 git diff | tmux-bridge file codex --stdin --name review.diff
 ```
 
+When sending a file alongside a `message`, use `--brief` to omit the `[tmux-bridge from:...]` header (only the message needs it):
+
+```bash
+git diff > /tmp/diff.txt
+tmux-bridge file codex --brief /tmp/diff.txt
+tmux-bridge message codex --enter 'Please review this diff'
+```
+
 The target agent reads the staged file at the shared path. By default, content is capped at 262144 bytes / 2000 lines; override with `--max-bytes` / `--max-lines`.
 
 ### Talking to Non-Agent Panes
@@ -390,7 +402,102 @@ tmux-bridge read worker 20        # read the result
 
 ---
 
-## Part 4: Maintenance
+## Part 4: Agent Pipeline (Flow)
+
+Pipeline lets you define multi-step agent workflows directly in `.smux`. Output from one agent automatically flows to the next — no manual routing needed.
+
+### Pipeline Syntax
+
+Add a `pipeline:` block to your `.smux` file (below the layout line):
+
+```
+cmd | writer codex, tester npm test | reviewer claude
+
+pipeline: review
+  steps:
+    writer -> tester   "Run tests on the changes and report results"
+    tester -> reviewer "Review the test results and code quality"
+```
+
+- `pipeline: <name>` — declares a pipeline
+- `steps:` — marks the beginning of step definitions (must be indented below)
+- Each step: `<from_label> -> <to_label> "<prompt>"` — the prompt tells the next agent what to do
+
+### Starting a Pipeline
+
+```bash
+smux flow start "Implement login with JWT auth"
+```
+
+This sends the first agent an initial task. If the pipeline is already running, `smux flow start` warns and suggests `smux flow reset`.
+
+### Auto-Start from Agent Pane
+
+You don't need `smux flow start`. Any agent can initiate the pipeline directly from its pane:
+
+```bash
+tmux-bridge flow step
+```
+
+On first call, `flow step` reads `.smux` from the session's project root, parses the pipeline, resolves pane labels, and routes the agent's output to the next step. The calling agent's `@name` must match the first step's `from` label.
+
+### Agent Protocol
+
+Each agent calls `tmux-bridge flow step` when done. It captures the agent's last 50 lines of output, routes them to the next agent along with the step's prompt, and advances the pipeline state.
+
+```
+[flow: review step 1/3] Run tests on the changes and report results
+--- output from previous step ---
+... (previous agent's output) ...
+```
+
+When the last step completes:
+
+```
+[flow: review] done — all 3 steps completed.
+```
+
+### Flow Commands
+
+| Command | Description |
+|---------|-------------|
+| `smux flow start [--pipeline <name>] [message...]` | Start a pipeline with an initial task |
+| `smux flow status` | Show pipeline steps and current progress |
+| `smux flow reset [--pipeline <name>]` | Reset pipeline to the first step |
+
+### Example: Full Review Pipeline
+
+**.smux:**
+```
+writer codex | reviewer claude
+
+pipeline: review
+  steps:
+    writer -> reviewer "Review the implementation and suggest improvements"
+```
+
+```bash
+# Start smux workspace
+smux start
+
+# Writer agent works on a task...
+
+# Writer calls flow step to route to reviewer:
+tmux-bridge flow step
+
+# Reviewer receives:
+# [flow: review step 1/1] Review the implementation and suggest improvements
+# --- output from previous step ---
+# (... writer's output ...)
+
+# Reviewer works and calls flow step:
+tmux-bridge flow step
+# → [flow: review] done — all 1 steps completed.
+```
+
+---
+
+## Part 5: Maintenance
 
 ### Updating smux
 
@@ -453,6 +560,9 @@ Completions cover: subcommands, pane labels (`tmux-bridge type <tab>`), session 
 | `smux attach` | Reattach |
 | `smux status [--agents]` | List sessions / agent panes |
 | `smux update [--check\|--dry-run]` | Update or compare installed files |
+| `smux flow start [message]` | Start pipeline |
+| `smux flow status` | Show pipeline progress |
+| `smux flow reset` | Restart pipeline |
 | `smux init` | Show DSL help |
 | `smux doctor` | Diagnostics |
 
@@ -462,9 +572,10 @@ Completions cover: subcommands, pane labels (`tmux-bridge type <tab>`), session 
 |---------|--------|
 | `tmux-bridge list` | List all panes |
 | `tmux-bridge read <t> [n]` | Read n lines |
-| `tmux-bridge message <t> <text>` | Send labeled message |
+| `tmux-bridge message <t> [--enter] <text>` | Send labeled message |
 | `tmux-bridge type <t> <text>` | Type text |
-| `tmux-bridge file <t> <path>` | Stage file, send shared path |
+| `tmux-bridge file <t> [--brief] <path>` | Stage file, send shared path |
 | `tmux-bridge keys <t> <key>` | Send key |
+| `tmux-bridge flow step` | Submit pipeline step |
 | `tmux-bridge wake <t>` | Escape from copy-mode/prompt |
 | `tmux-bridge name <t> <label>` | Label pane |
