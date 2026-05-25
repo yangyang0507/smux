@@ -2,7 +2,7 @@
 # smux — one-command tmux setup
 set -euo pipefail
 
-VERSION="2.2.0"
+VERSION="2.3.0"
 REPO="yangyang0507/smux"
 BRANCH="main"
 BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
@@ -340,8 +340,12 @@ layout_line() {
   local file="$1" line clean found="" count=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     clean=$(strip_inline_comment "$line")
+    [[ -n "$clean" ]] || continue
+    # Skip pipeline section and its indented steps
     clean=$(trim "$clean")
-    [[ -z "$clean" || "${clean:0:1}" == "#" ]] && continue
+    [[ -n "$clean" ]] || continue
+    [[ "$clean" =~ ^(pipeline:|steps:) ]] && continue
+    [[ "${line:0:1}" == " " || "${line:0:1}" == $'\t' ]] && continue
     (( count += 1 ))
     [[ $count -eq 1 ]] || error ".smux has multiple layout lines. .smux requires exactly one layout line."
     found="$clean"
@@ -423,6 +427,96 @@ unquote_command() {
     s="${s//\\\"/\"}"
   fi
   printf '%s' "$s"
+}
+
+# --- Pipeline parsing ---
+FLOW_STEP_FROM=()
+FLOW_STEP_TO=()
+FLOW_STEP_PROMPT=()
+FLOW_STEP_COUNT=0
+FLOW_NAME=""
+
+pipeline_lines() {
+  local file="$1" line clean
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    clean=$(strip_inline_comment "$line")
+    # Preserve indentation: check raw line, not trimmed
+    if [[ "$line" =~ ^[[:space:]] ]]; then
+      printf '%s\n' "$clean"
+      continue
+    fi
+    clean=$(trim "$clean")
+    [[ -n "$clean" ]] || continue
+    [[ "$clean" =~ ^pipeline:|^steps: ]] && printf '%s\n' "$clean"
+  done < "$file"
+}
+
+parse_pipeline() {
+  local file="$1" line clean name="" in_steps=0
+  FLOW_NAME=""; FLOW_STEP_FROM=(); FLOW_STEP_TO=(); FLOW_STEP_PROMPT=(); FLOW_STEP_COUNT=0
+  while IFS= read -r line; do
+    clean=$(strip_inline_comment "$line")
+    clean=$(trim "$clean")
+    [[ -n "$clean" ]] || continue
+    if [[ "$clean" =~ ^pipeline:[[:space:]]+ ]]; then
+      name=$(sed 's/^pipeline:[[:space:]]*//' <<< "$clean" | xargs)
+      [[ -n "$name" ]] || error "Pipeline name is empty in $file"
+      [[ -z "$FLOW_NAME" ]] || error "Multiple pipeline: declarations in $file"
+      FLOW_NAME="$name"
+    elif [[ "$clean" =~ ^steps: ]]; then
+      in_steps=1
+    elif [[ $in_steps -eq 1 ]]; then
+      clean=$(trim "$clean")
+      local from_label to_label prompt remainder
+      from_label="${clean%%[[:space:]-]*}"
+      from_label=$(trim "$from_label")
+      remainder="${clean#*->}"
+      remainder=$(trim "$remainder")
+      to_label="${remainder%%[[:space:]]*}"
+      remainder="${remainder#"$to_label"}"
+      remainder=$(trim "$remainder")
+      if [[ "${remainder:0:1}" == '"' ]]; then
+        prompt="${remainder:1}"
+        prompt="${prompt%\"}"
+      else
+        prompt="$remainder"
+      fi
+      [[ -n "$from_label" ]] || error "Missing 'from' label in pipeline step: $clean"
+      [[ -n "$to_label" ]] || error "Missing 'to' label in pipeline step: $clean"
+      local idx=$FLOW_STEP_COUNT
+      FLOW_STEP_COUNT=$((FLOW_STEP_COUNT + 1))
+      FLOW_STEP_FROM[$idx]="$from_label"
+      FLOW_STEP_TO[$idx]="$to_label"
+      FLOW_STEP_PROMPT[$idx]="$prompt"
+    fi
+  done < <(pipeline_lines "$file")
+  if [[ -z "$FLOW_NAME" && $FLOW_STEP_COUNT -gt 0 ]]; then
+    error "Steps found without a 'pipeline:' name in $file"
+  fi
+  [[ $FLOW_STEP_COUNT -gt 0 ]] || return 2
+}
+
+flow_state_file() {
+  local session="$1" name="$2"
+  echo "${TMPDIR:-/tmp}/tmux-bridge-flow-${session}-${name}"
+}
+
+flow_context_file() {
+  local session="$1" name="$2"
+  echo "${TMPDIR:-/tmp}/tmux-bridge-flow-${session}-${name}.ctx"
+}
+
+flow_label_for_pane() {
+  local pane="$1"
+  tmux display-message -t "$pane" -p '#{@name}' 2>/dev/null || echo "$pane"
+}
+
+find_pane_by_label() {
+  local label="$1"
+  local pane
+  pane=$(tmux list-panes -a -F '#{pane_id} #{@name}' 2>/dev/null | grep " ${label}$" | head -1 | awk '{print $1}')
+  [[ -n "$pane" ]] || error "No pane found with label '$label'. Verify the pipeline labels match agent pane labels. Run 'smux status --agents' to see all labeled panes."
+  echo "$pane"
 }
 
 # --- Parser state: populated by parse_layout(), consumed by start_layout() and preview ---
@@ -950,6 +1044,155 @@ INIT_HELP
   info "Next: smux start --preview  (or)  smux start"
 }
 
+cmd_flow() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    start)  cmd_flow_start "$@" ;;
+    status) cmd_flow_status "$@" ;;
+    reset)  cmd_flow_reset "$@" ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: smux flow <command>
+
+Commands:
+  start   [--pipeline <name>] [message...]  Start a pipeline with an initial task
+  status                                    Show active pipeline progress
+  reset   [--pipeline <name>]               Reset pipeline to the first step
+
+Examples:
+  smux flow start "Implement login function"
+  smux flow start --pipeline review-flow "Review src/auth.ts"
+  smux flow status
+  smux flow reset
+EOF
+      ;;
+    *) error "Unknown flow command: $sub. Use 'smux flow' to see options." ;;
+  esac
+}
+
+cmd_flow_start() {
+  local pipeline_name="" emsg=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pipeline)
+        [[ $# -ge 2 ]] || error "--pipeline requires a value"
+        pipeline_name="$2"; shift 2 ;;
+      --)
+        shift; emsg="$*"; break ;;
+      -*)
+        error "Unknown flow start option: $1" ;;
+      *)
+        emsg="$*"; break ;;
+    esac
+  done
+
+  command -v tmux >/dev/null 2>&1 || error "tmux not found."
+  local project session
+  project=$(find_project_root)
+  session=$(session_name_for "$project")
+  tmux has-session -t "$session" 2>/dev/null || error "No smux session found. Run 'smux start' first."
+
+  parse_pipeline "$project/.smux" || error "No pipeline defined in $project/.smux. Add a 'pipeline:' block."
+
+  if [[ -n "$pipeline_name" ]]; then
+    [[ "$pipeline_name" == "$FLOW_NAME" ]] || error "Pipeline '$pipeline_name' not found. Available: $FLOW_NAME"
+  fi
+
+  local state_file
+  state_file=$(flow_state_file "$session" "$FLOW_NAME")
+  if [[ -f "$state_file" ]]; then
+    local existing_step
+    existing_step=$(cat "$state_file")
+    error "Pipeline '$FLOW_NAME' is already running at step $(($existing_step + 1))/$FLOW_STEP_COUNT. Run 'smux flow reset' to restart."
+  fi
+
+  local first_label="${FLOW_STEP_FROM[0]}"
+  local first_pane
+  first_pane=$(find_pane_by_label "$first_label")
+
+  local prompt="${FLOW_STEP_PROMPT[0]}"
+  [[ -n "$emsg" ]] && prompt="$emsg"
+
+  echo "[flow] Starting '$FLOW_NAME' ($FLOW_STEP_COUNT steps)"
+  echo "[flow] Step 1/$FLOW_STEP_COUNT → $first_label: $prompt"
+
+  echo "0" > "$state_file"
+
+  local ctx_file session_label pane_label
+  ctx_file=$(flow_context_file "$session" "$FLOW_NAME")
+  session_label=$(tmux display-message -t "$session" -p '#{session_name}' 2>/dev/null || echo "$session")
+  {
+    echo "session=$session_label"
+    echo "name=$FLOW_NAME"
+    echo "steps=$FLOW_STEP_COUNT"
+    local i
+    for (( i=0; i<FLOW_STEP_COUNT; i++ )); do
+      pane_label=$(find_pane_by_label "${FLOW_STEP_TO[$i]}")
+      echo "step_${i}=${FLOW_STEP_FROM[$i]}|${FLOW_STEP_TO[$i]}|${pane_label}|${FLOW_STEP_PROMPT[$i]}"
+    done
+  } > "$ctx_file"
+
+  local header="[flow: ${FLOW_NAME} step 1/${FLOW_STEP_COUNT}]"
+  tmux send-keys -t "$first_pane" -l -- "$header $prompt"
+  tmux send-keys -t "$first_pane" Enter
+}
+
+cmd_flow_status() {
+  local project session state_file step_idx
+  project=$(find_project_root 2>/dev/null) || error "No project found. Run 'smux flow status' from a project directory."
+  session=$(session_name_for "$project")
+
+  parse_pipeline "$project/.smux" || error "No pipeline defined."
+
+  state_file=$(flow_state_file "$session" "$FLOW_NAME")
+  if [[ ! -f "$state_file" ]]; then
+    echo "No active pipeline for session '$session'."
+    return 1
+  fi
+
+  step_idx=$(cat "$state_file")
+  echo "Pipeline: $FLOW_NAME"
+  local i label status
+  for (( i=0; i<FLOW_STEP_COUNT; i++ )); do
+    label="${FLOW_STEP_FROM[$i]} → ${FLOW_STEP_TO[$i]}"
+    if (( i < step_idx )); then
+      status="✓ done"
+    elif (( i == step_idx )); then
+      status="● active"
+    else
+      status="○ pending"
+    fi
+    echo "  step $((i+1))/$FLOW_STEP_COUNT $label — $status"
+  done
+}
+
+cmd_flow_reset() {
+  local pipeline_name=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pipeline)
+        [[ $# -ge 2 ]] || error "--pipeline requires a value"
+        pipeline_name="$2"; shift 2 ;;
+      *)
+        error "Unknown flow reset option: $1" ;;
+    esac
+  done
+
+  local project session state_file
+  project=$(find_project_root 2>/dev/null) || error "No project found."
+  session=$(session_name_for "$project")
+
+  parse_pipeline "$project/.smux" || error "No pipeline defined."
+
+  [[ -z "$pipeline_name" || "$pipeline_name" == "$FLOW_NAME" ]] || error "Pipeline '$pipeline_name' not found."
+
+  state_file=$(flow_state_file "$session" "$FLOW_NAME")
+  rm -f "$state_file"
+  rm -f "$(flow_context_file "$session" "$FLOW_NAME")"
+  echo "Pipeline '$FLOW_NAME' reset."
+}
+
 cmd_doctor() {
   echo "smux doctor"
 
@@ -1124,6 +1367,7 @@ Commands:
   stop        Stop a smux-managed session
   attach      Attach to a session
   status      List smux-managed sessions or agent panes
+  flow        Agent workflow pipeline (start/status/reset)
   doctor      Diagnose smux and tmux setup
   version     Print version
   help        Show this help
@@ -1135,6 +1379,11 @@ Workspace:
   smux attach [-n <name>]
   smux status [--agents]
   smux update [--check] [--dry-run]
+
+Pipelines:
+  smux flow start [--pipeline <name>] [message...]
+  smux flow status
+  smux flow reset [--pipeline <name>]
 
 Files:
   ~/.smux/tmux.conf          tmux configuration
@@ -1165,6 +1414,7 @@ case "${1:-$_smux_default}" in
   stop)                       [[ $# -gt 0 ]] && shift; cmd_stop "$@" ;;
   attach)                     [[ $# -gt 0 ]] && shift; cmd_attach "$@" ;;
   status)                     [[ $# -gt 0 ]] && shift; cmd_status "$@" ;;
+  flow)                       [[ $# -gt 0 ]] && shift; cmd_flow "$@" ;;
   doctor)                     [[ $# -gt 0 ]] && shift; cmd_doctor "$@" ;;
   version|--version|-v|-V)    cmd_version ;;
   help|--help|-h)             cmd_help ;;

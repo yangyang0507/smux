@@ -38,6 +38,59 @@ Define a multi-pane tmux workspace with a `.smux` file and launch it with one co
 | `smux status --agents` | List labeled agent panes with pane IDs |
 | `smux doctor` | Diagnose tmux, config, project layout, and sessions |
 
+## Agent Pipeline (Flow)
+
+Define multi-step agent workflows where output from one agent automatically flows to the next. Define pipelines in `.smux` with a `pipeline:` block:
+
+```
+cmd | writer codex, tester "npm test | grep skip" | reviewer claude
+
+pipeline: review
+  steps:
+    writer -> tester   "Run tests on the changes and report results"
+    tester -> reviewer "Review the test results and code quality"
+```
+
+**Syntax:**
+- `pipeline: <name>` starts a pipeline definition
+- `steps:` marks the beginning of step definitions (indented)
+- Each step: `<from_label> -> <to_label> "<prompt>"`
+
+**Commands:**
+
+| Command | Description |
+|---|---|
+| `smux flow start [--pipeline <name>] [message...]` | Start a pipeline with an initial task |
+| `smux flow status` | Show all pipeline steps and current progress |
+| `smux flow reset [--pipeline <name>]` | Reset pipeline to the first step |
+
+**Agent protocol:** When an agent finishes its work, call `tmux-bridge flow step` to submit the current step and route output to the next agent:
+
+```bash
+tmux-bridge flow step
+```
+
+If no pipeline is active yet, `flow step` auto-starts from `.smux` — it reads the session's project root, parses the pipeline block, resolves pane labels, and begins routing. The calling agent's `@name` must match the first step's `from` label.
+
+It captures the agent's last 50 lines of output, sends them along with the next step's prompt to the next agent, and advances the pipeline state. When the last step completes, a `[flow: <name> done]` message appears and the pipeline cleans up.
+
+**Example flow (auto-start):**
+```bash
+# smux start already created writer/tester/reviewer panes
+# .smux has pipeline: review with writer -> tester -> reviewer
+# In writer pane:
+tmux-bridge flow step
+# → auto-detects .smux, starts pipeline, routes to tester
+# ... tester sees "[flow: review step 1/3] Run tests..." + writer output
+# In tester pane:
+tmux-bridge flow step
+# → routes to reviewer
+# ... reviewer sees "[flow: review step 2/3] Review..." + tester output
+# In reviewer pane:
+tmux-bridge flow step
+# → [flow: review done]
+```
+
 ## tmux-bridge — Cross-Pane Communication
 
 A CLI that lets any AI agent interact with any other tmux pane. Works via plain bash. Every command is **atomic**: `type` types text (no Enter), `keys` sends special keys, `read` captures pane content.
@@ -70,7 +123,7 @@ error: must read the pane before interacting. Run: tmux-bridge read codex
 |---|---|---|
 | `tmux-bridge list` | Show all panes with target, pid, command, size, label | `tmux-bridge list` |
 | `tmux-bridge type <target> [flags] [text...]` | Type text without pressing Enter | `printf '%s' "$msg" \| tmux-bridge type codex --stdin` |
-| `tmux-bridge message <target> [flags] [text...]` | Type text with auto sender info and reply target | `printf '%s' "$msg" \| tmux-bridge message codex --stdin` |
+| `tmux-bridge message <target> [--enter] [flags] [text...]` | Type text with auto sender info and reply target. `--enter` auto-submits after typing (no separate `keys Enter` needed) | `printf '%s' "$msg" \| tmux-bridge message codex --stdin --enter` |
 | `tmux-bridge file <target> [flags] <path>` | Stage file/stdin content and send the shared path | `tmux-bridge file codex ./diff.txt` |
 | `tmux-bridge read <target> [lines]` | Read last N lines (default 50) | `tmux-bridge read codex 100` |
 | `tmux-bridge keys <target> <key>...` | Send special keys | `tmux-bridge keys codex Enter` |
@@ -124,7 +177,12 @@ tmux-bridge keys codex Enter
 git diff | tmux-bridge file codex --stdin --name review.diff
 ```
 
-`file` truncates staged content by default at 262144 bytes or 2000 lines and appends a truncation notice. Override with `--max-bytes <n>` or `--max-lines <n>`.
+`file` truncates staged content by default at 262144 bytes or 2000 lines and appends a truncation notice. Override with `--max-bytes <n>` or `--max-lines <n>`. When sending a file alongside a `message`, use `--brief` to omit the `[tmux-bridge from:...]` header (the `message` command already provides it):
+
+```bash
+tmux-bridge file codex --brief /tmp/review.diff
+printf '%s' 'Here is the review diff' | tmux-bridge message codex --stdin
+```
 
 ### Target Resolution
 
@@ -139,11 +197,17 @@ Every interaction follows **read → act → read**. The CLI enforces this.
 **Sending a message to an agent:**
 ```bash
 tmux-bridge read codex 20                    # 1. READ — satisfy read guard
-printf '%s' 'Please review src/auth.ts' | tmux-bridge message codex --stdin
-                                              # 2. MESSAGE — auto-prepends sender info, no Enter
-tmux-bridge read codex 20                    # 3. READ — verify text landed
-tmux-bridge keys codex Enter                 # 4. KEYS — submit
+printf '%s' 'Please review src/auth.ts' | tmux-bridge message codex --stdin --enter
+                                              # 2. MESSAGE --enter — types and submits in one step
 # STOP. Do NOT read codex for a reply. The agent replies into YOUR pane.
+```
+
+Without `--enter`, message only types the text:
+```bash
+tmux-bridge read codex 20                    # 1. READ
+printf '%s' 'Please review src/auth.ts' | tmux-bridge message codex --stdin
+tmux-bridge read codex 20                    # 2. READ — verify text landed
+tmux-bridge keys codex Enter                 # 3. KEYS — submit
 ```
 
 **Approving a prompt (non-agent pane):**
@@ -174,11 +238,9 @@ tmux-bridge name "$(tmux-bridge id)" claude
 # 2. Discover other panes
 tmux-bridge list
 
-# 3. Send a message (read-act-read)
+# 3. Send a message (with --enter for agents)
 tmux-bridge read codex 20
-printf '%s' 'Please review the changes in src/auth.ts' | tmux-bridge message codex --stdin
-tmux-bridge read codex 20
-tmux-bridge keys codex Enter
+printf '%s' 'Please review the changes in src/auth.ts' | tmux-bridge message codex --stdin --enter
 ```
 
 ### Example Conversation
@@ -186,9 +248,7 @@ tmux-bridge keys codex Enter
 **Agent A (claude) sends:**
 ```bash
 tmux-bridge read codex 20
-printf '%s' 'What is the test coverage for src/auth.ts?' | tmux-bridge message codex --stdin
-tmux-bridge read codex 20
-tmux-bridge keys codex Enter
+printf '%s' 'What is the test coverage for src/auth.ts?' | tmux-bridge message codex --stdin --enter
 ```
 
 **Agent B (codex) sees in their prompt:**
@@ -199,9 +259,7 @@ tmux-bridge keys codex Enter
 **Agent B replies using the pane ID from the header:**
 ```bash
 tmux-bridge read %4 20
-printf '%s' '87% line coverage. Missing the OAuth refresh token path (lines 142-168).' | tmux-bridge message %4 --stdin
-tmux-bridge read %4 20
-tmux-bridge keys %4 Enter
+printf '%s' '87% line coverage. Missing the OAuth refresh token path (lines 142-168).' | tmux-bridge message %4 --stdin --enter
 ```
 
 ---

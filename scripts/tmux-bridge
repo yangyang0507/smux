@@ -3,7 +3,7 @@
 # Any tool that can run bash can use this to talk to other panes.
 set -euo pipefail
 
-VERSION="2.2.0"
+VERSION="2.3.0"
 
 # --- Helpers ---
 
@@ -118,9 +118,9 @@ Commands:
   list                      Show all panes (target, pid, command, size, label)
   type <target> [flags] [text...]
                             Type text without pressing Enter
-  message <target> [flags] [text...]
+  message <target> [--enter] [flags] [text...]
                             Type text with auto-prepended sender info and reply target
-  file <target> [--stdin] [--name <name>] [--max-bytes <n>] [--max-lines <n>] [path]
+  file <target> [--brief] [--stdin] [--name <name>] [--max-bytes <n>] [--max-lines <n>] [path]
                             Stage file/stdin content and send a short file notice
   read <target> [lines]     Read last N lines from pane (default: 50)
   keys <target> <key>...    Send special keys (Enter, Escape, C-c, etc.)
@@ -128,6 +128,7 @@ Commands:
   name <target> <label>     Label a pane (visible in tmux border)
   resolve <label>           Print pane target for a label
   id                        Print this pane's ID ($TMUX_PANE)
+  flow step                 Submit current step and route to next agent in pipeline
   doctor                    Diagnose tmux connectivity issues
   version                   Print version
 
@@ -141,6 +142,7 @@ Input modes for type/message:
 File transfer:
   file <target> <path>        Copy local file to /tmp and send the staged path
   file <target> --stdin       Read stdin into /tmp and send the staged path
+  --brief                     Omit the [tmux-bridge from:...] header (use when combined with message)
   --name <name>               Display name for stdin content
   --max-bytes <n>             Max staged bytes before truncation (default: 262144)
   --max-lines <n>             Max staged lines before truncation (default: 2000)
@@ -384,11 +386,19 @@ cmd_type() {
 cmd_message() {
   require_tmux
   require_args 1 $# "message"
-  local target text
+  local target text enter=false args=()
   target=$(resolve_target "$1"); shift
   validate_target "$target"
   require_read "$target"
   require_normal_mode "$target"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --enter) enter=true; shift ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  set -- "${args[@]}"
 
   parse_text "$@"
   text="$GET_TEXT_RESULT"
@@ -406,6 +416,9 @@ cmd_message() {
 
   local header="[tmux-bridge from:${from} pane:${sender_pane} at:${session_win} — load the smux skill to reply]"
   tmx send-keys -t "$target" -l -- "${header} $text"
+  if $enter; then
+    tmx send-keys -t "$target" Enter
+  fi
   clear_read "$target"
 }
 
@@ -419,6 +432,7 @@ cmd_file() {
   require_normal_mode "$target"
 
   local use_stdin=false
+  local brief=false
   local name=""
   local max_bytes=262144
   local max_lines=2000
@@ -427,6 +441,7 @@ cmd_file() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --stdin) use_stdin=true; shift ;;
+      --brief) brief=true; shift ;;
       --name)
         [[ $# -ge 2 ]] || die "--name requires a value"
         name="$2"; shift 2 ;;
@@ -482,16 +497,23 @@ cmd_file() {
     status_note="truncated to ${max_bytes} bytes / ${max_lines} lines"
   fi
 
-  local sender_pane="${TMUX_PANE:-}"
-  [[ -n "$sender_pane" ]] || die "not running inside a tmux pane (\$TMUX_PANE is unset)"
-  local sender_label from session_win
-  sender_label=$(tmx display-message -t "$sender_pane" -p '#{@name}' 2>/dev/null || true)
-  from="${sender_label:-$sender_pane}"
-  session_win=$(tmx display-message -t "$sender_pane" -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)
+  if $brief; then
+    local notice="Shared file '${name}' (${FILE_LINES_ORIG} lines, ${FILE_BYTES_ORIG} bytes, ${status_note}): ${dest}"
+    tmx send-keys -t "$target" -l -- "$notice"
+    tmx send-keys -t "$target" Enter
+  else
+    local sender_pane="${TMUX_PANE:-}"
+    [[ -n "$sender_pane" ]] || die "not running inside a tmux pane (\$TMUX_PANE is unset)"
+    local sender_label from session_win
+    sender_label=$(tmx display-message -t "$sender_pane" -p '#{@name}' 2>/dev/null || true)
+    from="${sender_label:-$sender_pane}"
+    session_win=$(tmx display-message -t "$sender_pane" -p '#{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)
 
-  local header="[tmux-bridge from:${from} pane:${sender_pane} at:${session_win} — load the smux skill to reply]"
-  local notice="${header} Shared file '${name}' (${FILE_LINES_ORIG} lines, ${FILE_BYTES_ORIG} bytes, ${status_note}): ${dest}"
-  tmx send-keys -t "$target" -l -- "$notice"
+    local header="[tmux-bridge from:${from} pane:${sender_pane} at:${session_win} — load the smux skill to reply]"
+    local notice="${header} Shared file '${name}' (${FILE_LINES_ORIG} lines, ${FILE_BYTES_ORIG} bytes, ${status_note}): ${dest}"
+    tmx send-keys -t "$target" -l -- "$notice"
+    tmx send-keys -t "$target" Enter
+  fi
   clear_read "$target"
   printf '%s\n' "$dest"
 }
@@ -571,6 +593,147 @@ cmd_id() {
     die "not running inside a tmux pane (\$TMUX_PANE is unset)"
   fi
   echo "$TMUX_PANE"
+}
+
+# --- Flow step: agent submits current step and routes to next ---
+# If no pipeline is active, auto-reads .smux from the session's project root
+# and starts the pipeline at step 0 (sender → first target).
+
+flow_parse_smux() {
+  local file="$1" line clean name="" in_steps=0
+  FLOW_TMP_NAME=""; FLOW_TMP_FROM=(); FLOW_TMP_TO=(); FLOW_TMP_PROMPT=(); FLOW_TMP_COUNT=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    local inq=0 esc=0 buf="" ch j raw_clean=""
+    for (( j=0; j<${#line}; j++ )); do
+      ch="${line:j:1}"
+      if (( esc )); then raw_clean="${raw_clean}${ch}"; esc=0; continue; fi
+      if [[ "$ch" == "\\" && $inq -eq 1 ]]; then raw_clean="${raw_clean}${ch}"; esc=1; continue; fi
+      if [[ "$ch" == '"' ]]; then (( inq = 1 - inq )); raw_clean="${raw_clean}${ch}"; continue; fi
+      if [[ "$ch" == "#" && $inq -eq 0 ]]; then break; fi
+      raw_clean="${raw_clean}${ch}"
+    done
+    clean="${raw_clean#"${raw_clean%%[![:space:]]*}"}"
+    clean="${clean%"${clean##*[![:space:]]}"}"
+    [[ -n "$clean" ]] || continue
+    if [[ "$clean" =~ ^pipeline:[[:space:]]+ && -z "$name" ]]; then
+      name=$(sed 's/^pipeline:[[:space:]]*//' <<< "$clean" | xargs)
+      [[ -z "$FLOW_TMP_NAME" ]] || return 2
+      FLOW_TMP_NAME="$name"
+    elif [[ "$clean" =~ ^steps: ]]; then
+      in_steps=1
+    elif [[ $in_steps -eq 1 && ("${line:0:1}" == " " || "${line:0:1}" == $'\t') ]]; then
+      local from_label="${clean%%[[:space:]-]*}"
+      from_label=$(echo "$from_label" | xargs)
+      local rem="${clean#*->}"; rem=$(echo "$rem" | xargs)
+      local to_label="${rem%%[[:space:]]*}"
+      rem="${rem#"$to_label"}"; rem=$(echo "$rem" | xargs)
+      local prompt="$rem"
+      if [[ "${prompt:0:1}" == '"' ]]; then prompt="${prompt:1}"; prompt="${prompt%\"}"; fi
+      FLOW_TMP_FROM+=("$from_label")
+      FLOW_TMP_TO+=("$to_label")
+      FLOW_TMP_PROMPT+=("$prompt")
+      (( FLOW_TMP_COUNT++ ))
+    fi
+  done < "$file"
+  [[ -n "$FLOW_TMP_NAME" ]] || return 2
+}
+
+cmd_flow_step() {
+  require_tmux
+  [[ -n "${TMUX_PANE:-}" ]] || die "not running inside a tmux pane (flow step must be called from an agent pane)"
+  local sender_pane="$TMUX_PANE"
+
+  local session
+  session=$(tmx display-message -t "$sender_pane" -p '#{session_name}' 2>/dev/null || true)
+  [[ -n "$session" ]] || die "cannot determine session"
+
+  local ctx_file state_file
+  ctx_file=$(ls "${TMPDIR:-/tmp}"/tmux-bridge-flow-"${session}"-*.ctx 2>/dev/null | head -1 || true)
+
+  if [[ -z "$ctx_file" ]]; then
+    # Auto-start: read .smux from the session's project root
+    local project
+    project=$(tmx show-options -t "$session" -qv @smux_project 2>/dev/null || true)
+    [[ -n "$project" ]] || die "session '$session' is not smux-managed (@smux_project not set). Cannot auto-start pipeline."
+    [[ -f "$project/.smux" ]] || die "no .smux found at $project/.smux"
+
+    flow_parse_smux "$project/.smux"
+    [[ -n "$FLOW_TMP_NAME" && $FLOW_TMP_COUNT -gt 0 ]] || die "no pipeline defined in $project/.smux"
+
+    # Resolve sender's label — must match step 0's "from"
+    local sender_label
+    sender_label=$(tmx display-message -t "$sender_pane" -p '#{@name}' 2>/dev/null || true)
+    [[ -n "$sender_label" ]] || die "cannot determine sender label. Label your pane first: tmux-bridge name \$(tmux-bridge id) <label>"
+    [[ "$sender_label" == "${FLOW_TMP_FROM[0]}" ]] || die "pane label '$sender_label' does not match pipeline step 1 'from' label '${FLOW_TMP_FROM[0]}'. Are you the first agent in the pipeline?"
+
+    ctx_file="${TMPDIR:-/tmp}/tmux-bridge-flow-${session}-${FLOW_TMP_NAME}.ctx"
+    state_file="${ctx_file%.ctx}"
+    {
+      echo "session=$session"
+      echo "name=$FLOW_TMP_NAME"
+      echo "steps=$FLOW_TMP_COUNT"
+      local i pane_target
+      for (( i=0; i<FLOW_TMP_COUNT; i++ )); do
+        pane_target=$(tmx list-panes -a -F '#{pane_id} #{@name}' 2>/dev/null | grep " ${FLOW_TMP_TO[$i]}$" | head -1 | awk '{print $1}')
+        [[ -n "$pane_target" ]] || die "no pane found with label '${FLOW_TMP_TO[$i]}' needed for pipeline step $((i+1))"
+        echo "step_${i}=${FLOW_TMP_FROM[$i]}|${FLOW_TMP_TO[$i]}|${pane_target}|${FLOW_TMP_PROMPT[$i]}"
+      done
+    } > "$ctx_file"
+    echo "0" > "$state_file"
+
+    echo "[flow: ${FLOW_TMP_NAME}] auto-started from .smux (${FLOW_TMP_COUNT} steps)"
+  else
+    state_file="${ctx_file%.ctx}"
+  fi
+
+  local flow_name flow_steps step_idx
+  flow_name=$(grep '^name=' "$ctx_file" | cut -d= -f2-)
+  flow_steps=$(grep '^steps=' "$ctx_file" | cut -d= -f2-)
+
+  if [[ ! -f "$state_file" ]]; then
+    step_idx=0
+    echo "0" > "$state_file"
+  else
+    step_idx=$(cat "$state_file")
+  fi
+
+  # Route current step to the next agent
+  local step_info next_from next_to next_pane next_prompt
+  step_info=$(grep "^step_${step_idx}=" "$ctx_file" | cut -d= -f2-)
+  [[ -n "$step_info" ]] || die "step $step_idx not found in pipeline context"
+
+  next_to=$(echo "$step_info" | cut -d'|' -f2)
+  next_pane=$(echo "$step_info" | cut -d'|' -f3)
+  next_prompt=$(echo "$step_info" | cut -d'|' -f4-)
+
+  [[ -n "$next_pane" ]] || die "cannot resolve pane for label '$next_to' in pipeline '$flow_name'"
+
+  local captured
+  captured=$(tmx capture-pane -t "$sender_pane" -p -J -S -50 2>/dev/null || true)
+
+  local header="[flow: ${flow_name} step $((step_idx + 1))/${flow_steps}]"
+  tmx send-keys -t "$next_pane" -l -- "$header $next_prompt"
+  tmx send-keys -t "$next_pane" Enter
+
+  if [[ -n "$captured" ]]; then
+    tmx send-keys -t "$next_pane" -l -- "--- output from previous step ---"
+    tmx send-keys -t "$next_pane" Enter
+    local IFS=$'\n'
+    for line in $captured; do
+      tmx send-keys -t "$next_pane" -l -- "$line"
+    done
+    tmx send-keys -t "$next_pane" Enter
+  fi
+
+  # Advance
+  local next_idx=$((step_idx + 1))
+  if (( next_idx >= flow_steps )); then
+    rm -f "$state_file" "$ctx_file"
+    echo "[flow: ${flow_name}] done — all $flow_steps steps completed."
+  else
+    echo "$next_idx" > "$state_file"
+    echo "[flow: ${flow_name}] step $((next_idx + 1))/$flow_steps → $next_to"
+  fi
 }
 
 cmd_doctor() {
@@ -673,5 +836,6 @@ case "$1" in
   name)    shift; cmd_name "$@" ;;
   resolve) shift; cmd_resolve "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
+  flow)    shift; cmd_flow_step "$@" ;;
   *)       die "unknown command: $1. Run 'tmux-bridge' for usage." ;;
 esac

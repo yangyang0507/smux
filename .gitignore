@@ -7,4 +7,5 @@
 # Personal config (machine-specific)
 .claude/
 .pi/
+.commandcode/
 .smux
