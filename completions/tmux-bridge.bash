@@ -50,8 +50,11 @@ _tmux_bridge_complete() {
         COMPREPLY=( $(compgen -W "--stdin --name --max-bytes --max-lines --" -- "$cur") )
       fi
       ;;
+    list)
+      COMPREPLY=( $(compgen -W "--all -a" -- "$cur") )
+      ;;
     resolve)
-      COMPREPLY=( $(compgen -W "$(_tmux_bridge_targets)" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$(_tmux_bridge_targets) --all -a" -- "$cur") )
       ;;
   esac
 }

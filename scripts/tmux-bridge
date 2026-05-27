@@ -3,7 +3,7 @@
 # Any tool that can run bash can use this to talk to other panes.
 set -euo pipefail
 
-VERSION="2.4.0"
+VERSION="2.5.0"
 
 # --- Helpers ---
 
@@ -170,7 +170,7 @@ tmux-bridge — cross-pane communication for AI agents
 Usage: tmux-bridge <command> [args...]
 
 Commands:
-  list                      Show all panes (target, pid, command, size, label)
+  list [--all|-a]           Show panes in current project scope (--all for all panes)
   type <target> [flags] [text...]
                             Type text without pressing Enter
   message <target> [--enter] [flags] [text...]
@@ -181,7 +181,7 @@ Commands:
   keys <target> <key>...    Send special keys (Enter, Escape, C-c, etc.)
   wake <target>             Send Escape once if target is in tmux mode/prompt
   name <target> <label>     Label a pane (visible in tmux border)
-  resolve <label>           Print pane target for a label
+  resolve [--all|-a] <label> Print pane target for a label (scoped by default)
   id                        Print this pane's ID ($TMUX_PANE)
   flow step                 Submit current step and route to next agent in pipeline
   doctor                    Diagnose tmux connectivity issues
@@ -242,11 +242,19 @@ resolve_target() {
 
 resolve_label() {
   local label="$1"
+  local all="${2:-false}"
   local result
-  result=$(tmx list-panes -a -F '#{pane_id} #{@name}' 2>/dev/null \
-    | awk -v lbl="$label" '$2 == lbl { print $1; exit }')
+  if $all; then
+    result=$(list_panes_scoped --all | awk -F'|' -v lbl="$label" '$7 == lbl { print $1; exit }')
+  else
+    result=$(list_panes_scoped | awk -F'|' -v lbl="$label" '$7 == lbl { print $1; exit }')
+  fi
   if [[ -z "$result" ]]; then
-    die "no pane found with label '$label'"
+    if $all; then
+      die "no pane found with label '$label'"
+    else
+      die "no pane found with label '$label' in current project. Use 'resolve --all $label' or 'list --all' to find panes globally."
+    fi
   fi
   echo "$result"
 }
@@ -395,15 +403,110 @@ copy_limited_file() {
   FILE_TRUNCATED="$truncated"
 }
 
+# --- Scope Helpers ---
+
+# Determine the project root for the calling pane.
+# Priority: @smux_project on pane's session → walk up from cwd for .smux/.git → cwd fallback.
+# Returns 0 and prints the root path, or returns 1 if TMUX_PANE is unset.
+current_scope_root() {
+  local pane="${TMUX_PANE:-}"
+  [[ -n "$pane" ]] || return 1
+
+  local session
+  session=$(tmx display-message -t "$pane" -p '#{session_name}' 2>/dev/null || true)
+  [[ -n "$session" ]] || return 1
+
+  # Priority 1: @smux_project on the pane's session
+  local project
+  project=$(tmx show-options -t "$session" -qv @smux_project 2>/dev/null || true)
+  if [[ -n "$project" && -d "$project" ]]; then
+    # Normalize in case @smux_project is a symlink or relative path
+    local norm_project
+    norm_project=$(cd -P "$project" 2>/dev/null && pwd -P 2>/dev/null || echo "$project")
+    echo "$norm_project"
+    return 0
+  fi
+
+  # Priority 2: Walk up from pane_current_path to find .smux or .git
+  local cwd
+  cwd=$(tmx display-message -t "$pane" -p '#{pane_current_path}' 2>/dev/null || true)
+  [[ -n "$cwd" ]] || return 1
+
+  # Normalize with cd -P to resolve symlinks
+  local normalized
+  normalized=$(cd -P "$cwd" 2>/dev/null && pwd -P 2>/dev/null || echo "$cwd")
+
+  local dir="$normalized"
+  while [[ "$dir" != "/" && "$dir" != "." ]]; do
+    if [[ -f "$dir/.smux" || -d "$dir/.git" ]]; then
+      echo "$dir"
+      return 0
+    fi
+    dir=$(dirname "$dir")
+  done
+
+  # Priority 3: Fallback to normalized cwd
+  echo "$normalized"
+  return 0
+}
+
+# Check if a pane cwd falls within the scope root.
+# Both cwd and root are normalized for symlink safety.
+pane_in_scope() {
+  local cwd="$1" root="$2"
+  local norm_cwd
+  norm_cwd=$(cd -P "$cwd" 2>/dev/null && pwd -P 2>/dev/null || echo "$cwd")
+  [[ "$norm_cwd" == "$root" ]] && return 0
+  [[ "$norm_cwd" == "$root"/* ]] && return 0
+  return 1
+}
+
+# List panes, optionally scoped to the current project.
+# Outputs pipe-delimited format: pane_id|session|win_idx|win_name|pid|wxh|label|cwd
+# Pass --all to skip scope filtering (global list).
+list_panes_scoped() {
+  local all=false
+  [[ "${1:-}" == "--all" ]] && all=true
+
+  local root=""
+  if ! $all; then
+    root=$(current_scope_root 2>/dev/null || true)
+    [[ -z "$root" ]] && all=true
+  fi
+
+  local fmt
+  fmt='#{pane_id}|#{session_name}|#{window_index}|#{window_name}|#{pane_pid}|#{pane_width}x#{pane_height}|#{@name}|#{pane_current_path}'
+
+  if $all; then
+    tmx list-panes -a -F "$fmt" 2>/dev/null
+  else
+    tmx list-panes -a -F "$fmt" 2>/dev/null | while IFS='|' read -r id sess widx wname pid size label cwd; do
+      if pane_in_scope "$cwd" "$root"; then
+        printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$sess" "$widx" "$wname" "$pid" "$size" "$label" "$cwd"
+      fi
+    done
+  fi
+}
+
 # --- Commands ---
 
 cmd_list() {
   require_tmux
+  local all=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all|-a) all=true; shift ;;
+      *) die "unknown list flag: $1" ;;
+    esac
+  done
+
   printf "%-8s %-16s %-10s %-25s %-10s %s\n" "TARGET" "SESSION:WIN" "SIZE" "PROCESS" "LABEL" "CWD"
   # shellcheck disable=SC2034
-  tmx list-panes -a \
-    -F '#{pane_id}|#{session_name}|#{window_index}|#{window_name}|#{pane_pid}|#{pane_width}x#{pane_height}|#{@name}|#{pane_current_path}' \
-    2>/dev/null | while IFS='|' read -r id sess widx wname pid size label cwd; do
+  if $all; then
+    list_panes_scoped --all
+  else
+    list_panes_scoped
+  fi | while IFS='|' read -r id sess widx wname pid size label cwd; do
       # Get the actual running process (deepest child of pane pid)
       local proc child_pid
       proc=$(ps -o comm= -p "$pid" 2>/dev/null || echo "?")
@@ -643,9 +746,16 @@ cmd_name() {
 }
 
 cmd_resolve() {
-  require_args 1 $# "resolve"
   require_tmux
-  resolve_label "$1"
+  local all=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all|-a) all=true; shift ;;
+      *) break ;;
+    esac
+  done
+  [[ $# -eq 1 ]] || die "'resolve' requires exactly one label argument. Run 'tmux-bridge' for usage."
+  resolve_label "$1" "$all"
 }
 
 cmd_id() {
@@ -844,12 +954,26 @@ cmd_doctor() {
 
   # Pane count
   if [[ "$detected" != "__failed__" ]]; then
-    local count
+    local count scoped_count
     count=$(tmx list-panes -a -F '#{pane_id}' 2>/dev/null | wc -l | tr -d ' ')
     echo "Total panes:        $count"
     local labeled
     labeled=$(tmx list-panes -a -F '#{@name}' 2>/dev/null | grep -cv '^$' || echo 0)
     echo "Labeled panes:      $labeled"
+    # Scope info
+    local scope_root
+    scope_root=$(current_scope_root 2>/dev/null || true)
+    if [[ -n "$scope_root" ]]; then
+      scoped_count=$(list_panes_scoped 2>/dev/null | wc -l | tr -d ' ')
+      echo "Scope root:         $scope_root"
+      echo "Scoped panes:       $scoped_count"
+    else
+      if [[ -z "${TMUX_PANE:-}" ]]; then
+        echo "Scope:              unavailable (\$TMUX_PANE unset)"
+      else
+        echo "Scope:              unavailable (pane not visible or session unreachable)"
+      fi
+    fi
   fi
 
   echo "---"
