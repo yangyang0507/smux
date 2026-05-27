@@ -1,0 +1,4 @@
+# Layout with inline and full-line comments
+a echo hello # this is a comment
+# this is a full-line comment
+b echo world

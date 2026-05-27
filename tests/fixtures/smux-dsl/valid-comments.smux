@@ -1,0 +1,4 @@
+# This is a valid layout with inline and full-line comments
+# Full line comment before layout
+a echo hello # inline comment after command
+# More comments between layout elements do not create another layout line

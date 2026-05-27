@@ -1,0 +1,5 @@
+layout	panes=2	cols=2
+pane	0	0	a	
+pane	1	1	b	
+pipeline	review-flow	steps=1
+step	0	a	b	ZG8gdGhlIHRoaW5n

@@ -1,0 +1,2 @@
+# Edge case: pipe inside quotes (literal, not structural)
+a "echo | pipe" | b test

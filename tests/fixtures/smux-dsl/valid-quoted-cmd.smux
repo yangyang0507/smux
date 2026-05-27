@@ -1,0 +1,2 @@
+# Layout with quoted command containing pipe
+a "echo | pipe" | b test

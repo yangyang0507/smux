@@ -24,6 +24,8 @@ run_one() {
 }
 
 # Tests that don't require tmux
+run_one "$SCRIPT_DIR/test_parser.sh"
+run_one "$SCRIPT_DIR/test_dsl_spec.sh"
 run_one "$SCRIPT_DIR/test_parse_text.sh"
 run_one "$SCRIPT_DIR/test_read_guard.sh"
 run_one "$SCRIPT_DIR/test_roundtrip.sh"
@@ -33,10 +35,12 @@ if command -v tmux &>/dev/null; then
   run_one "$SCRIPT_DIR/test_smux_workspace.sh"
   run_one "$SCRIPT_DIR/test_mode_guard.sh"
   run_one "$SCRIPT_DIR/test_file_transfer.sh"
+  run_one "$SCRIPT_DIR/test_flow_step.sh"
 else
   echo "[test_smux_workspace.sh] SKIPPED (tmux not installed)"
   echo "[test_mode_guard.sh] SKIPPED (tmux not installed)"
   echo "[test_file_transfer.sh] SKIPPED (tmux not installed)"
+  echo "[test_flow_step.sh] SKIPPED (tmux not installed)"
   echo ""
 fi
 

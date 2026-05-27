@@ -1,0 +1,6 @@
+# Pipeline with quoted multi-word prompt
+a | b
+
+pipeline: review
+steps:
+  a -> b "Please review all changes and provide feedback"

@@ -1,0 +1,6 @@
+# Regression: quoted pipeline name (must strip quotes)
+a | b
+
+pipeline: "review-flow"
+steps:
+  a -> b "do the thing"

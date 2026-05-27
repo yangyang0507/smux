@@ -1,0 +1,2 @@
+# Error fixture: invalid label (contains !)
+bad-label! cmd

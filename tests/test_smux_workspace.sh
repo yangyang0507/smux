@@ -35,8 +35,8 @@ assert_eq "$line" "runner \"printf '# keep this'\""
 
 test_name "parse_layout accepts commented layout"
 parse_layout "$line"
-assert_eq "${PANE_LABELS[0]}" "runner"
-assert_eq "${PANE_COMMANDS[0]}" "printf '# keep this'"
+assert_eq "${SMUX_PANE_LABELS[0]}" "runner"
+assert_eq "${SMUX_PANE_COMMANDS[0]}" "printf '# keep this'"
 
 test_name "status --agents lists labeled panes"
 tmux new-session -d -s "$TEST_SESSION" -c "$SCRIPT_DIR/.." "sleep 60"

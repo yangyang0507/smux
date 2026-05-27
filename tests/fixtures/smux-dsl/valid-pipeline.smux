@@ -1,0 +1,7 @@
+# Layout with pipeline block
+w writer, r reviewer
+
+pipeline: review-flow
+steps:
+  w -> r "review this change"
+  r -> w "feedback applied"

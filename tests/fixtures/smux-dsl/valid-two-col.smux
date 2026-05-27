@@ -1,0 +1,2 @@
+# Two columns
+a echo col1 | b echo col2

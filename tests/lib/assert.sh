@@ -25,6 +25,17 @@ assert_eq() {
   ((++ASSERT_PASSED))
 }
 
+assert_neq() {
+  local got="$1" expected="$2" msg="${3:-}"
+  if [[ "$got" == "$expected" ]]; then
+    echo -e "    ${RED}FAIL${NC}: expected value to differ from '$expected'${msg:+ — $msg}"
+    ((++ASSERT_FAILED))
+    return 1
+  fi
+  echo -e "    ${GREEN}OK${NC}"
+  ((++ASSERT_PASSED))
+}
+
 assert_contains() {
   local haystack="$1" needle="$2" msg="${3:-}"
   if [[ "$haystack" != *"$needle"* ]]; then

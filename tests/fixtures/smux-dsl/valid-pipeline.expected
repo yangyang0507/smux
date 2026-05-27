@@ -1,0 +1,6 @@
+layout	panes=2	cols=1
+pane	0	0	w	d3JpdGVy
+pane	1	0	r	cmV2aWV3ZXI=
+pipeline	review-flow	steps=2
+step	0	w	r	cmV2aWV3IHRoaXMgY2hhbmdl
+step	1	r	w	ZmVlZGJhY2sgYXBwbGllZA==

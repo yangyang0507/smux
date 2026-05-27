@@ -2,7 +2,7 @@
 # smux — one-command tmux setup
 set -euo pipefail
 
-VERSION="2.3.0"
+VERSION="2.4.0"
 REPO="yangyang0507/smux"
 BRANCH="main"
 BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
@@ -101,14 +101,17 @@ ensure_path() {
     *)      rc_file="$HOME/.profile" ;;
   esac
 
+  # shellcheck disable=SC2016
   local path_line='export PATH="$HOME/.smux/bin:$PATH"'
 
   # Write to rc file if not already present
   if [[ -f "$rc_file" ]] && ! grep -qF '.smux/bin' "$rc_file"; then
     info "Adding ~/.smux/bin to PATH in $rc_file"
-    echo "" >> "$rc_file"
-    echo "# smux" >> "$rc_file"
-    echo "$path_line" >> "$rc_file"
+    {
+      echo ""
+      echo "# smux"
+      echo "$path_line"
+    } >> "$rc_file"
   fi
 
   # Export into current shell if not already in PATH
@@ -130,11 +133,14 @@ rc_references_completion() {
   file="$COMPLETION_DIR/${name}.bash"
   while IFS= read -r rc; do
     [[ -f "$rc" ]] || continue
+    # shellcheck disable=SC2088
     if grep -Fq "$file" "$rc" ||
        grep -Fq "\$HOME/.smux/completions/${name}.bash" "$rc" ||
+       grep -Fq "$HOME/.smux/completions/${name}.bash" "$rc" ||
        grep -Fq "~/.smux/completions/${name}.bash" "$rc" ||
        grep -Fq "$COMPLETION_DIR" "$rc" ||
        grep -Fq "\$HOME/.smux/completions" "$rc" ||
+       grep -Fq "$HOME/.smux/completions" "$rc" ||
        grep -Fq "~/.smux/completions" "$rc"; then
       printf '%s\n' "$rc"
       return 0
@@ -273,9 +279,11 @@ trim() {
 }
 
 repeat_char() {
-  local ch="$1" n="$2" out=""
-  while (( n-- > 0 )); do out="${out}${ch}"; done
-  printf '%s' "$out"
+  local ch="$1" n="$2"
+  if (( n <= 0 )); then return 0; fi
+  local spaces
+  printf -v spaces '%*s' "$n" ''
+  printf '%s' "${spaces// /$ch}"
 }
 
 valid_name() {
@@ -430,11 +438,11 @@ unquote_command() {
 }
 
 # --- Pipeline parsing ---
-FLOW_STEP_FROM=()
-FLOW_STEP_TO=()
-FLOW_STEP_PROMPT=()
-FLOW_STEP_COUNT=0
-FLOW_NAME=""
+SMUX_FLOW_STEP_FROM=()
+SMUX_FLOW_STEP_TO=()
+SMUX_FLOW_STEP_PROMPT=()
+SMUX_FLOW_STEP_COUNT=0
+SMUX_FLOW_NAME=""
 
 pipeline_lines() {
   local file="$1" line clean
@@ -453,16 +461,22 @@ pipeline_lines() {
 
 parse_pipeline() {
   local file="$1" line clean name="" in_steps=0
-  FLOW_NAME=""; FLOW_STEP_FROM=(); FLOW_STEP_TO=(); FLOW_STEP_PROMPT=(); FLOW_STEP_COUNT=0
+  SMUX_FLOW_NAME=""; SMUX_FLOW_STEP_FROM=(); SMUX_FLOW_STEP_TO=(); SMUX_FLOW_STEP_PROMPT=(); SMUX_FLOW_STEP_COUNT=0
   while IFS= read -r line; do
     clean=$(strip_inline_comment "$line")
     clean=$(trim "$clean")
     [[ -n "$clean" ]] || continue
     if [[ "$clean" =~ ^pipeline:[[:space:]]+ ]]; then
-      name=$(sed 's/^pipeline:[[:space:]]*//' <<< "$clean" | xargs)
+      name="${clean#pipeline:}"
+      name="${name#"${name%%[![:space:]]*}"}"
+      name="${name%"${name##*[![:space:]]}"}"
+      # Strip surrounding double quotes (matches legacy xargs behavior)
+      if [[ "${name:0:1}" == '"' && "${name: -1}" == '"' ]]; then
+        name="${name:1:${#name}-2}"
+      fi
       [[ -n "$name" ]] || error "Pipeline name is empty in $file"
-      [[ -z "$FLOW_NAME" ]] || error "Multiple pipeline: declarations in $file"
-      FLOW_NAME="$name"
+      [[ -z "$SMUX_FLOW_NAME" ]] || error "Multiple pipeline: declarations in $file"
+      SMUX_FLOW_NAME="$name"
     elif [[ "$clean" =~ ^steps: ]]; then
       in_steps=1
     elif [[ $in_steps -eq 1 ]]; then
@@ -483,17 +497,17 @@ parse_pipeline() {
       fi
       [[ -n "$from_label" ]] || error "Missing 'from' label in pipeline step: $clean"
       [[ -n "$to_label" ]] || error "Missing 'to' label in pipeline step: $clean"
-      local idx=$FLOW_STEP_COUNT
-      FLOW_STEP_COUNT=$((FLOW_STEP_COUNT + 1))
-      FLOW_STEP_FROM[$idx]="$from_label"
-      FLOW_STEP_TO[$idx]="$to_label"
-      FLOW_STEP_PROMPT[$idx]="$prompt"
+      local idx=$SMUX_FLOW_STEP_COUNT
+      SMUX_FLOW_STEP_COUNT=$((SMUX_FLOW_STEP_COUNT + 1))
+      SMUX_FLOW_STEP_FROM[idx]="$from_label"
+      SMUX_FLOW_STEP_TO[idx]="$to_label"
+      SMUX_FLOW_STEP_PROMPT[idx]="$prompt"
     fi
   done < <(pipeline_lines "$file")
-  if [[ -z "$FLOW_NAME" && $FLOW_STEP_COUNT -gt 0 ]]; then
+  if [[ -z "$SMUX_FLOW_NAME" && $SMUX_FLOW_STEP_COUNT -gt 0 ]]; then
     error "Steps found without a 'pipeline:' name in $file"
   fi
-  [[ $FLOW_STEP_COUNT -gt 0 ]] || return 2
+  [[ $SMUX_FLOW_STEP_COUNT -gt 0 ]] || return 2
 }
 
 flow_state_file() {
@@ -519,17 +533,34 @@ find_pane_by_label() {
   echo "$pane"
 }
 
+# Portable base64 encode via system base64 command (present on macOS and Linux).
+b64_encode() { printf '%s' "$1" | base64 | tr -d '\n'; }
+
+# Emit TSV+base64 pipeline output after parse_pipeline has populated SMUX_FLOW_* vars.
+# Format matches tests/test_dsl_spec.sh golden output.
+emit_pipeline_tsv() {
+  printf 'pipeline\t%s\tsteps=%d\n' "$(b64_encode "$SMUX_FLOW_NAME")" "$SMUX_FLOW_STEP_COUNT"
+  local j
+  for (( j=0; j<SMUX_FLOW_STEP_COUNT; j++ )); do
+    printf 'step\t%d\t%s\t%s\t%s\n' "$j" \
+      "${SMUX_FLOW_STEP_FROM[j]}" \
+      "${SMUX_FLOW_STEP_TO[j]}" \
+      "$(b64_encode "${SMUX_FLOW_STEP_PROMPT[j]}")"
+  done
+}
+
 # --- Parser state: populated by parse_layout(), consumed by start_layout() and preview ---
-# Arrays are indexed by global pane index (0..PANE_COUNT-1).
-# COL_START[c] = first pane index in column c; COL_COUNT[c] = number of panes in column c.
-PANE_LABELS=()
-PANE_COMMANDS=()
-PANE_COLS=()
-COL_START=()
-COL_COUNT=()
+# Arrays are indexed by global pane index (0..SMUX_PANE_COUNT-1).
+# SMUX_COL_START[c] = first pane index in column c; SMUX_COL_COUNT[c] = number of panes in column c.
+SMUX_PANE_LABELS=()
+SMUX_PANE_COMMANDS=()
+# shellcheck disable=SC2034
+SMUX_PANE_COLS=()
+SMUX_COL_START=()
+SMUX_COL_COUNT=()
 COL_WIDTH=()
-PANE_COUNT=0
-COL_COUNT_TOTAL=0
+SMUX_PANE_COUNT=0
+SMUX_COL_COUNT_TOTAL=0
 
 # Parse a .smux layout line into the global pane/column arrays.
 # Splits by '|' to get columns, then by ',' to get panes within each column.
@@ -538,12 +569,12 @@ COL_COUNT_TOTAL=0
 parse_layout() {
   local line="$1" col cell label cmd rest col_start col_count
   quote_balanced "$line" || error "Unclosed quote in .smux layout: $line. Fix the quote, then run 'smux start --dry-run' to verify."
-  PANE_LABELS=(); PANE_COMMANDS=(); PANE_COLS=(); COL_START=(); COL_COUNT=()
-  PANE_COUNT=0; COL_COUNT_TOTAL=0
+  SMUX_PANE_LABELS=(); SMUX_PANE_COMMANDS=(); SMUX_PANE_COLS=(); SMUX_COL_START=(); SMUX_COL_COUNT=()
+  SMUX_PANE_COUNT=0; SMUX_COL_COUNT_TOTAL=0
   while IFS= read -r col; do
     col=$(trim "$col")
     [[ -n "$col" ]] || error "Empty column in .smux layout: $line. Remove the extra '|' or add a label."
-    col_start=$PANE_COUNT
+    col_start=$SMUX_PANE_COUNT
     col_count=0
     while IFS= read -r cell; do
       cell=$(trim "$cell")
@@ -552,14 +583,15 @@ parse_layout() {
       rest="${cell#"$label"}"
       cmd=$(unquote_command "$rest")
       valid_name "$label" || error "Invalid label '$label'. Labels must match [A-Za-z0-9_.-]+. Use a label like 'test-runner npm test'."
-      PANE_LABELS[$PANE_COUNT]="$label"
-      PANE_COMMANDS[$PANE_COUNT]="$cmd"
-      PANE_COLS[$PANE_COUNT]="$COL_COUNT_TOTAL"
-      (( PANE_COUNT += 1, col_count += 1 ))
+      SMUX_PANE_LABELS[SMUX_PANE_COUNT]="$label"
+      SMUX_PANE_COMMANDS[SMUX_PANE_COUNT]="$cmd"
+      # shellcheck disable=SC2034
+      SMUX_PANE_COLS[SMUX_PANE_COUNT]="$SMUX_COL_COUNT_TOTAL"
+      (( SMUX_PANE_COUNT += 1, col_count += 1 ))
     done < <(split_aware "$col" ",")
-    COL_START[$COL_COUNT_TOTAL]="$col_start"
-    COL_COUNT[$COL_COUNT_TOTAL]="$col_count"
-    (( COL_COUNT_TOTAL += 1 ))
+    SMUX_COL_START[SMUX_COL_COUNT_TOTAL]="$col_start"
+    SMUX_COL_COUNT[SMUX_COL_COUNT_TOTAL]="$col_count"
+    (( SMUX_COL_COUNT_TOTAL += 1 ))
   done < <(split_aware "$line" "|")
 }
 
@@ -576,15 +608,15 @@ display_cmd() {
 
 print_plan() {
   local session="$1" project="$2" i labelw=10 d
-  for (( i=0; i<PANE_COUNT; i++ )); do
-    ((${#PANE_LABELS[$i]} > labelw)) && labelw=${#PANE_LABELS[$i]}
+  for (( i=0; i<SMUX_PANE_COUNT; i++ )); do
+    ((${#SMUX_PANE_LABELS[$i]} > labelw)) && labelw=${#SMUX_PANE_LABELS[$i]}
   done
   echo "session: $session"
   echo "project: $project"
   echo "panes:"
-  for (( i=0; i<PANE_COUNT; i++ )); do
-    d=$(display_cmd "${PANE_COMMANDS[$i]}")
-    printf "  %-*s  %s\n" "$labelw" "${PANE_LABELS[$i]}" "$d"
+  for (( i=0; i<SMUX_PANE_COUNT; i++ )); do
+    d=$(display_cmd "${SMUX_PANE_COMMANDS[$i]}")
+    printf "  %-*s  %s\n" "$labelw" "${SMUX_PANE_LABELS[$i]}" "$d"
   done
 }
 
@@ -597,16 +629,16 @@ fit_text() {
 
 preview_line_for() {
   local col="$1" row="$2" height="$3" width="$4" n start mid p off idx text=""
-  n="${COL_COUNT[$col]}"; start="${COL_START[$col]}"
+  n="${SMUX_COL_COUNT[$col]}"; start="${SMUX_COL_START[$col]}"
   if (( n == 1 )); then
     mid=$((height/2))
-    (( row == mid-1 )) && text="${PANE_LABELS[$start]}"
-    (( row == mid )) && text=$(display_cmd "${PANE_COMMANDS[$start]}")
+    (( row == mid-1 )) && text="${SMUX_PANE_LABELS[$start]}"
+    (( row == mid )) && text=$(display_cmd "${SMUX_PANE_COMMANDS[$start]}")
   else
     for (( p=0; p<n; p++ )); do
       off=$((p*3)); idx=$((start+p))
-      (( row == off )) && text="${PANE_LABELS[$idx]}"
-      (( row == off+1 )) && text=$(display_cmd "${PANE_COMMANDS[$idx]}")
+      (( row == off )) && text="${SMUX_PANE_LABELS[$idx]}"
+      (( row == off+1 )) && text=$(display_cmd "${SMUX_PANE_COMMANDS[$idx]}")
       if (( p < n-1 && row == off+2 )); then
         repeat_char "─" "$width"
         return
@@ -618,30 +650,30 @@ preview_line_for() {
 
 print_preview() {
   local c i width max_rows=0 row
-  for (( c=0; c<COL_COUNT_TOTAL; c++ )); do
+  for (( c=0; c<SMUX_COL_COUNT_TOTAL; c++ )); do
     width=10
-    for (( i=0; i<COL_COUNT[$c]; i++ )); do
-      local idx=$((COL_START[$c]+i)) d
-      d=$(display_cmd "${PANE_COMMANDS[$idx]}")
-      ((${#PANE_LABELS[$idx]}+2 > width)) && width=$((${#PANE_LABELS[$idx]}+2))
+    for (( i=0; i<SMUX_COL_COUNT[c]; i++ )); do
+      local idx=$((SMUX_COL_START[c]+i)) d
+      d=$(display_cmd "${SMUX_PANE_COMMANDS[$idx]}")
+      ((${#SMUX_PANE_LABELS[$idx]}+2 > width)) && width=$((${#SMUX_PANE_LABELS[$idx]}+2))
       ((${#d}+2 > width)) && width=$((${#d}+2))
     done
     (( width > 24 )) && width=24
-    COL_WIDTH[$c]="$width"
-    local rows=$((COL_COUNT[$c]*2 + COL_COUNT[$c] - 1))
+    COL_WIDTH[c]="$width"
+    local rows=$((SMUX_COL_COUNT[c]*2 + SMUX_COL_COUNT[c] - 1))
     (( rows > max_rows )) && max_rows=$rows
   done
   # --- Draw top border: ┌──┬──┬──┐ ---
   printf '┌'
-  for (( c=0; c<COL_COUNT_TOTAL; c++ )); do
+  for (( c=0; c<SMUX_COL_COUNT_TOTAL; c++ )); do
     repeat_char "─" "${COL_WIDTH[$c]}"
-    (( c == COL_COUNT_TOTAL-1 )) && printf '┐' || printf '┬'
+    (( c == SMUX_COL_COUNT_TOTAL-1 )) && printf '┐' || printf '┬'
   done
   printf '\n'
   # --- Draw rows ---
   for (( row=0; row<max_rows; row++ )); do
     printf '│'
-    for (( c=0; c<COL_COUNT_TOTAL; c++ )); do
+    for (( c=0; c<SMUX_COL_COUNT_TOTAL; c++ )); do
       preview_line_for "$c" "$row" "$max_rows" "${COL_WIDTH[$c]}"
       printf '│'
     done
@@ -649,9 +681,9 @@ print_preview() {
   done
   # --- Draw bottom border: └──┴──┴──┘ ---
   printf '└'
-  for (( c=0; c<COL_COUNT_TOTAL; c++ )); do
+  for (( c=0; c<SMUX_COL_COUNT_TOTAL; c++ )); do
     repeat_char "─" "${COL_WIDTH[$c]}"
-    (( c == COL_COUNT_TOTAL-1 )) && printf '┘' || printf '┴'
+    (( c == SMUX_COL_COUNT_TOTAL-1 )) && printf '┘' || printf '┴'
   done
   printf '\n'
 }
@@ -687,35 +719,35 @@ start_layout() {
   pane=$(tmux new-session -d -s "$session" -c "$project" -P -F '#{pane_id}')
   PANE_IDS[0]="$pane"; COL_TOP[0]="$pane"
   tmux set-option -t "$session" @smux_project "$project" >/dev/null
-  for (( col=1; col<COL_COUNT_TOTAL; col++ )); do
+  for (( col=1; col<SMUX_COL_COUNT_TOTAL; col++ )); do
     prev="${COL_TOP[$((col-1))]}"                              # target = previous column's top pane
     pane=$(tmux split-window -h -t "$prev" -c "$project" -P -F '#{pane_id}')
-    idx="${COL_START[$col]}"
-    PANE_IDS[$idx]="$pane"
-    COL_TOP[$col]="$pane"
+    idx="${SMUX_COL_START[col]}"
+    PANE_IDS[idx]="$pane"
+    COL_TOP[col]="$pane"
   done
   tmux select-layout -t "$session:0" even-horizontal >/dev/null 2>&1 || true
   # --- Phase 2: stack panes vertically within each column ---
-  for (( col=0; col<COL_COUNT_TOTAL; col++ )); do
-    k="${COL_COUNT[$col]}"
-    prev="${COL_TOP[$col]}"
+  for (( col=0; col<SMUX_COL_COUNT_TOTAL; col++ )); do
+    k="${SMUX_COL_COUNT[col]}"
+    prev="${COL_TOP[col]}"
     for (( j=1; j<k; j++ )); do
       pct=$((100*(k-j)/(k-j+1)))                                # split remaining space proportionally
       (( pct < 1 )) && pct=50
       pane=$(tmux split-window -v -p "$pct" -t "$prev" -c "$project" -P -F '#{pane_id}')
-      idx=$((COL_START[$col]+j))
-      PANE_IDS[$idx]="$pane"
+      idx=$((SMUX_COL_START[col]+j))
+      PANE_IDS[idx]="$pane"
       prev="$pane"
     done
   done
   # --- Phase 3: label and launch ---
-  for (( idx=0; idx<PANE_COUNT; idx++ )); do
+  for (( idx=0; idx<SMUX_PANE_COUNT; idx++ )); do
     pane="${PANE_IDS[$idx]}"
-    if [[ -n "${PANE_LABELS[$idx]}" ]]; then
-      tmux set-option -p -t "$pane" @smux_label "${PANE_LABELS[$idx]}" >/dev/null
-      tmux set-option -p -t "$pane" @name "${PANE_LABELS[$idx]}" >/dev/null
+    if [[ -n "${SMUX_PANE_LABELS[$idx]}" ]]; then
+      tmux set-option -p -t "$pane" @smux_label "${SMUX_PANE_LABELS[$idx]}" >/dev/null
+      tmux set-option -p -t "$pane" @name "${SMUX_PANE_LABELS[$idx]}" >/dev/null
     fi
-    send_command_to_pane "$pane" "${PANE_COMMANDS[$idx]}"
+    send_command_to_pane "$pane" "${SMUX_PANE_COMMANDS[$idx]}"
   done
   (( detached )) || {
     if [[ -n "${TMUX:-}" ]]; then tmux switch-client -t "$session"; else tmux attach -t "$session"; fi
@@ -772,7 +804,7 @@ cmd_install() {
 
   # 9. Done
   echo ""
-  printf "${GREEN}${BOLD}smux installed!${NC}\n"
+  printf '%s%s%s\n' "${GREEN}${BOLD}" "smux installed!" "${NC}"
   echo ""
   echo "  Config:       ~/.smux/tmux.conf"
   echo "  tmux-bridge:  ~/.smux/bin/tmux-bridge"
@@ -850,7 +882,7 @@ cmd_uninstall() {
 
   # Check for backups to restore
   local latest_backup
-  latest_backup=$(ls -t "$BACKUP_DIR"/tmux.conf.* 2>/dev/null | head -1 || true)
+  latest_backup=$(find "$BACKUP_DIR" -maxdepth 1 -name 'tmux.conf.*' -print0 2>/dev/null | xargs -0 ls -t 2>/dev/null | head -1 || true)
   if [[ -n "$latest_backup" ]]; then
     info "Restoring backup: $latest_backup"
     mkdir -p "$TMUX_XDG_DIR"
@@ -862,7 +894,7 @@ cmd_uninstall() {
   info "Removed ~/.smux/"
 
   echo ""
-  printf "${GREEN}${BOLD}smux uninstalled.${NC}\n"
+  printf '%s%s%s\n' "${GREEN}${BOLD}" "smux uninstalled." "${NC}"
   echo ""
   echo "  Note: You may want to remove the PATH line from your shell rc file:"
   echo "    export PATH=\"\$HOME/.smux/bin:\$PATH\""
@@ -1044,6 +1076,14 @@ INIT_HELP
   info "Next: smux start --preview  (or)  smux start"
 }
 
+cmd_parse_pipeline() {
+  local file="${1:-}"
+  [[ -n "$file" ]] || error "Usage: smux parse-pipeline <file>"
+  [[ -f "$file" ]] || error "File not found: $file"
+  parse_pipeline "$file"
+  emit_pipeline_tsv
+}
+
 cmd_flow() {
   local sub="${1:-}"
   shift || true
@@ -1059,6 +1099,7 @@ Commands:
   start   [--pipeline <name>] [message...]  Start a pipeline with an initial task
   status                                    Show active pipeline progress
   reset   [--pipeline <name>]               Reset pipeline to the first step
+  reset   --stale [minutes]                  Clean up stale flow files (default: 24h)
 
 Examples:
   smux flow start "Implement login function"
@@ -1096,44 +1137,44 @@ cmd_flow_start() {
   parse_pipeline "$project/.smux" || error "No pipeline defined in $project/.smux. Add a 'pipeline:' block."
 
   if [[ -n "$pipeline_name" ]]; then
-    [[ "$pipeline_name" == "$FLOW_NAME" ]] || error "Pipeline '$pipeline_name' not found. Available: $FLOW_NAME"
+    [[ "$pipeline_name" == "$SMUX_FLOW_NAME" ]] || error "Pipeline '$pipeline_name' not found. Available: $SMUX_FLOW_NAME"
   fi
 
   local state_file
-  state_file=$(flow_state_file "$session" "$FLOW_NAME")
+  state_file=$(flow_state_file "$session" "$SMUX_FLOW_NAME")
   if [[ -f "$state_file" ]]; then
     local existing_step
     existing_step=$(cat "$state_file")
-    error "Pipeline '$FLOW_NAME' is already running at step $(($existing_step + 1))/$FLOW_STEP_COUNT. Run 'smux flow reset' to restart."
+    error "Pipeline '$SMUX_FLOW_NAME' is already running at step $((existing_step + 1))/$SMUX_FLOW_STEP_COUNT. Run 'smux flow reset' to restart."
   fi
 
-  local first_label="${FLOW_STEP_FROM[0]}"
+  local first_label="${SMUX_FLOW_STEP_FROM[0]}"
   local first_pane
   first_pane=$(find_pane_by_label "$first_label")
 
-  local prompt="${FLOW_STEP_PROMPT[0]}"
+  local prompt="${SMUX_FLOW_STEP_PROMPT[0]}"
   [[ -n "$emsg" ]] && prompt="$emsg"
 
-  echo "[flow] Starting '$FLOW_NAME' ($FLOW_STEP_COUNT steps)"
-  echo "[flow] Step 1/$FLOW_STEP_COUNT → $first_label: $prompt"
+  echo "[flow] Starting '$SMUX_FLOW_NAME' ($SMUX_FLOW_STEP_COUNT steps)"
+  echo "[flow] Step 1/$SMUX_FLOW_STEP_COUNT → $first_label: $prompt"
 
   echo "0" > "$state_file"
 
   local ctx_file session_label pane_label
-  ctx_file=$(flow_context_file "$session" "$FLOW_NAME")
+  ctx_file=$(flow_context_file "$session" "$SMUX_FLOW_NAME")
   session_label=$(tmux display-message -t "$session" -p '#{session_name}' 2>/dev/null || echo "$session")
   {
     echo "session=$session_label"
-    echo "name=$FLOW_NAME"
-    echo "steps=$FLOW_STEP_COUNT"
+    echo "name=$SMUX_FLOW_NAME"
+    echo "steps=$SMUX_FLOW_STEP_COUNT"
     local i
-    for (( i=0; i<FLOW_STEP_COUNT; i++ )); do
-      pane_label=$(find_pane_by_label "${FLOW_STEP_TO[$i]}")
-      echo "step_${i}=${FLOW_STEP_FROM[$i]}|${FLOW_STEP_TO[$i]}|${pane_label}|${FLOW_STEP_PROMPT[$i]}"
+    for (( i=0; i<SMUX_FLOW_STEP_COUNT; i++ )); do
+      pane_label=$(find_pane_by_label "${SMUX_FLOW_STEP_TO[$i]}")
+      echo "step_${i}=${SMUX_FLOW_STEP_FROM[$i]}|${SMUX_FLOW_STEP_TO[$i]}|${pane_label}|${SMUX_FLOW_STEP_PROMPT[$i]}"
     done
   } > "$ctx_file"
 
-  local header="[flow: ${FLOW_NAME} step 1/${FLOW_STEP_COUNT}]"
+  local header="[flow: ${SMUX_FLOW_NAME} step 1/${SMUX_FLOW_STEP_COUNT}]"
   tmux send-keys -t "$first_pane" -l -- "$header $prompt"
   tmux send-keys -t "$first_pane" Enter
 }
@@ -1145,17 +1186,17 @@ cmd_flow_status() {
 
   parse_pipeline "$project/.smux" || error "No pipeline defined."
 
-  state_file=$(flow_state_file "$session" "$FLOW_NAME")
+  state_file=$(flow_state_file "$session" "$SMUX_FLOW_NAME")
   if [[ ! -f "$state_file" ]]; then
     echo "No active pipeline for session '$session'."
     return 1
   fi
 
   step_idx=$(cat "$state_file")
-  echo "Pipeline: $FLOW_NAME"
+  echo "Pipeline: $SMUX_FLOW_NAME"
   local i label status
-  for (( i=0; i<FLOW_STEP_COUNT; i++ )); do
-    label="${FLOW_STEP_FROM[$i]} → ${FLOW_STEP_TO[$i]}"
+  for (( i=0; i<SMUX_FLOW_STEP_COUNT; i++ )); do
+    label="${SMUX_FLOW_STEP_FROM[$i]} → ${SMUX_FLOW_STEP_TO[$i]}"
     if (( i < step_idx )); then
       status="✓ done"
     elif (( i == step_idx )); then
@@ -1163,11 +1204,40 @@ cmd_flow_status() {
     else
       status="○ pending"
     fi
-    echo "  step $((i+1))/$FLOW_STEP_COUNT $label — $status"
+    echo "  step $((i+1))/$SMUX_FLOW_STEP_COUNT $label — $status"
   done
 }
 
 cmd_flow_reset() {
+  # --stale: clean up flow files older than N minutes (default 24h)
+  if [[ "${1:-}" == "--stale" ]]; then
+    shift
+    local older_than="1440"
+    if [[ $# -ge 1 ]]; then
+      local arg="$1"
+      [[ "$arg" =~ ^[0-9]+$ && "$arg" -gt 0 ]] || error "--stale minutes must be a positive integer, got: $arg"
+      older_than="$arg"
+      shift
+    fi
+    [[ $# -eq 0 ]] || error "Usage: smux flow reset --stale [minutes]"
+    local stale
+    stale=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name "tmux-bridge-flow-*-*" \
+      -mmin +"$older_than" 2>/dev/null || true)
+    if [[ -z "$stale" ]]; then
+      echo "No stale flow files found."
+      return 0
+    fi
+    local count=0 f
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      rm -f "$f"
+      rm -f "${f%.ctx}"
+      (( ++count ))
+    done <<< "$stale"
+    echo "Removed $count stale flow file(s) (older than $older_than minutes)."
+    return 0
+  fi
+
   local pipeline_name=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1185,12 +1255,12 @@ cmd_flow_reset() {
 
   parse_pipeline "$project/.smux" || error "No pipeline defined."
 
-  [[ -z "$pipeline_name" || "$pipeline_name" == "$FLOW_NAME" ]] || error "Pipeline '$pipeline_name' not found."
+  [[ -z "$pipeline_name" || "$pipeline_name" == "$SMUX_FLOW_NAME" ]] || error "Pipeline '$pipeline_name' not found."
 
-  state_file=$(flow_state_file "$session" "$FLOW_NAME")
+  state_file=$(flow_state_file "$session" "$SMUX_FLOW_NAME")
   rm -f "$state_file"
-  rm -f "$(flow_context_file "$session" "$FLOW_NAME")"
-  echo "Pipeline '$FLOW_NAME' reset."
+  rm -f "$(flow_context_file "$session" "$SMUX_FLOW_NAME")"
+  echo "Pipeline '$SMUX_FLOW_NAME' reset."
 }
 
 cmd_doctor() {
@@ -1289,7 +1359,7 @@ cmd_doctor() {
   if project=$(find_project_root_safe 2>"$project_err"); then
     doctor_ok "project .smux: $project/.smux"
     if line=$(layout_line "$project/.smux" 2>"$project_err") &&
-       parse_err=$( (parse_layout "$line"; printf '%s|%s' "$PANE_COUNT" "$COL_COUNT_TOTAL") 2>"$project_err"); then
+       parse_err=$( (parse_layout "$line"; printf '%s|%s' "$SMUX_PANE_COUNT" "$SMUX_COL_COUNT_TOTAL") 2>"$project_err"); then
       doctor_ok "layout parses: ${parse_err%%|*} panes, ${parse_err##*|} columns"
       if session=$(session_name_for "$project" "" 2>/dev/null); then
         if tmux has-session -t "$session" 2>/dev/null; then
@@ -1345,6 +1415,18 @@ cmd_doctor() {
       done < <(tmux list-panes -t "$mode_sess" -F '#{pane_id}|#{@name}|#{pane_in_mode}' 2>/dev/null)
     done < <(tmux list-sessions -F '#{session_name}|#{@smux_project}' 2>/dev/null)
     (( mode_found )) || doctor_ok "smux panes are in normal input mode"
+  fi
+
+  local stale_ctx
+  stale_ctx=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name "tmux-bridge-flow-*-*.ctx" \
+    -mmin +1440 2>/dev/null | head -10 || true)
+  if [[ -n "$stale_ctx" ]]; then
+    doctor_warn "Stale flow files found (older than 24h):"
+    local sf
+    while IFS= read -r sf; do
+      [[ -n "$sf" ]] && doctor_info "  $sf"
+    done <<< "$stale_ctx"
+    doctor_info "Clean with: smux flow reset --stale"
   fi
 }
 
@@ -1415,6 +1497,7 @@ case "${1:-$_smux_default}" in
   attach)                     [[ $# -gt 0 ]] && shift; cmd_attach "$@" ;;
   status)                     [[ $# -gt 0 ]] && shift; cmd_status "$@" ;;
   flow)                       [[ $# -gt 0 ]] && shift; cmd_flow "$@" ;;
+  parse-pipeline)             [[ $# -gt 0 ]] && shift; cmd_parse_pipeline "$@" ;;
   doctor)                     [[ $# -gt 0 ]] && shift; cmd_doctor "$@" ;;
   version|--version|-v|-V)    cmd_version ;;
   help|--help|-h)             cmd_help ;;

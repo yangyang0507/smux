@@ -3,11 +3,52 @@
 # Any tool that can run bash can use this to talk to other panes.
 set -euo pipefail
 
-VERSION="2.3.0"
+VERSION="2.4.0"
 
 # --- Helpers ---
 
 die() { echo "error: $*" >&2; exit 1; }
+
+# Resolve smux CLI path: SMUX_CLI → sibling binary → PATH.
+# Sets global RESOLVED_SMUX on success. Returns 0 if found, 1 if not found.
+# Calls die() directly (not in command substitution) so SMUX_CLI invalid → fatal.
+resolve_smux() {
+  # 1. SMUX_CLI env var — must be executable if set
+  if [[ -n "${SMUX_CLI:-}" ]]; then
+    if [[ -x "$SMUX_CLI" ]]; then
+      RESOLVED_SMUX="$SMUX_CLI"
+      return 0
+    fi
+    die "SMUX_CLI is set to '$SMUX_CLI' but it is not executable."
+  fi
+  # 2. Sibling binary next to tmux-bridge
+  local sibling="${0%/*}/smux"
+  if [[ -x "$sibling" ]]; then
+    RESOLVED_SMUX="$sibling"
+    return 0
+  fi
+  # 3. PATH lookup
+  local path_smux
+  path_smux=$(command -v smux 2>/dev/null) || true
+  if [[ -n "$path_smux" && -x "$path_smux" ]]; then
+    RESOLVED_SMUX="$path_smux"
+    return 0
+  fi
+  return 1
+}
+
+# Portable base64 decode with round-trip validation.
+# Decodes base64 input from stdin, then re-encodes and compares against original.
+# Returns 0 only if round-trip matches (valid canonical base64 from b64_encode).
+b64_decode() {
+  local input decoded recoded
+  input=$(cat)
+  decoded=$(printf '%s' "$input" | base64 -d 2>/dev/null) || \
+    decoded=$(printf '%s' "$input" | base64 -D 2>/dev/null) || return 1
+  recoded=$(printf '%s' "$decoded" | base64 | tr -d '\n') || return 1
+  [[ "$recoded" == "$input" ]] || return 1
+  printf '%s' "$decoded"
+}
 
 # --- Read Guard ---
 # Enforces read-before-act: agents must read a pane before typing/keys.
@@ -66,10 +107,13 @@ detect_socket() {
     # Check both /tmp and /private/tmp (macOS symlinks /tmp → /private/tmp,
     # but some sandboxed environments only see one or the other)
     local sock_dirs=("/tmp/tmux-${uid}" "/private/tmp/tmux-${uid}")
+    local sock scanned=0
     for sock_dir in "${sock_dirs[@]}"; do
       [[ -d "$sock_dir" ]] || continue
       for sock in "$sock_dir"/*; do
         [[ -S "$sock" ]] || continue
+        (( ++scanned ))
+        if [[ $scanned -gt 30 ]]; then break 2; fi
         if tmux -S "$sock" display-message -t "$pane" -p '#{pane_id}' &>/dev/null; then
           echo "$sock"
           return
@@ -106,6 +150,17 @@ tmx() {
   else
     tmux -S "$TMUX_SOCKET" "$@"
   fi
+}
+
+# Send Enter after a literal send-keys, with configurable delay.
+# Avoids timing race where Enter arrives before tmux finishes buffering the text.
+send_enter_after_literal() {
+  local target="$1"
+  local delay="${TMUX_BRIDGE_ENTER_DELAY:-1}"
+  if [[ "$delay" != "0" ]]; then
+    sleep "$delay"
+  fi
+  tmx send-keys -t "$target" Enter
 }
 
 usage() {
@@ -345,6 +400,7 @@ copy_limited_file() {
 cmd_list() {
   require_tmux
   printf "%-8s %-16s %-10s %-25s %-10s %s\n" "TARGET" "SESSION:WIN" "SIZE" "PROCESS" "LABEL" "CWD"
+  # shellcheck disable=SC2034
   tmx list-panes -a \
     -F '#{pane_id}|#{session_name}|#{window_index}|#{window_name}|#{pane_pid}|#{pane_width}x#{pane_height}|#{@name}|#{pane_current_path}' \
     2>/dev/null | while IFS='|' read -r id sess widx wname pid size label cwd; do
@@ -352,7 +408,11 @@ cmd_list() {
       local proc child_pid
       proc=$(ps -o comm= -p "$pid" 2>/dev/null || echo "?")
       # Find child process (e.g. claude/node running inside zsh) — works on macOS + Linux
-      child_pid=$(pgrep -P "$pid" 2>/dev/null | head -1 || true)
+      child_pid=$(pgrep -P "$pid" 2>/dev/null | head -1) || true
+      if [[ -z "$child_pid" ]]; then
+        # Fallback for systems without pgrep -P (BusyBox, etc.)
+        child_pid=$(ps -o pid= -o ppid= 2>/dev/null | awk -v ppid="$pid" '$2==ppid {print $1; exit}') || child_pid=""
+      fi
       if [[ -n "$child_pid" ]]; then
         local child_proc
         child_proc=$(ps -o comm= -p "$child_pid" 2>/dev/null || true)
@@ -417,7 +477,7 @@ cmd_message() {
   local header="[tmux-bridge from:${from} pane:${sender_pane} at:${session_win} — load the smux skill to reply]"
   tmx send-keys -t "$target" -l -- "${header} $text"
   if $enter; then
-    tmx send-keys -t "$target" Enter
+    send_enter_after_literal "$target"
   fi
   clear_read "$target"
 }
@@ -476,13 +536,13 @@ cmd_file() {
     [[ -n "$name" ]] || name="stdin.txt"
   fi
 
-  local safe_name tmp_src dest id
+  local safe_name tmp_src dest tmp_dir
   safe_name=$(sanitize_file_name "$name")
-  id="${RANDOM:-0}-$$-$(date +%s)"
-  dest="${TMPDIR:-/tmp}/tmux-bridge-file-${id}-${safe_name}"
+  tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tmux-bridge-file-XXXXXX") || die "failed to create temp dir"
+  dest="$tmp_dir/$safe_name"
 
   if $use_stdin; then
-    tmp_src="${TMPDIR:-/tmp}/tmux-bridge-stdin-${id}"
+    tmp_src="$tmp_dir/stdin"
     cat >"$tmp_src"
   else
     tmp_src="$src"
@@ -599,45 +659,6 @@ cmd_id() {
 # If no pipeline is active, auto-reads .smux from the session's project root
 # and starts the pipeline at step 0 (sender → first target).
 
-flow_parse_smux() {
-  local file="$1" line clean name="" in_steps=0
-  FLOW_TMP_NAME=""; FLOW_TMP_FROM=(); FLOW_TMP_TO=(); FLOW_TMP_PROMPT=(); FLOW_TMP_COUNT=0
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    local inq=0 esc=0 buf="" ch j raw_clean=""
-    for (( j=0; j<${#line}; j++ )); do
-      ch="${line:j:1}"
-      if (( esc )); then raw_clean="${raw_clean}${ch}"; esc=0; continue; fi
-      if [[ "$ch" == "\\" && $inq -eq 1 ]]; then raw_clean="${raw_clean}${ch}"; esc=1; continue; fi
-      if [[ "$ch" == '"' ]]; then (( inq = 1 - inq )); raw_clean="${raw_clean}${ch}"; continue; fi
-      if [[ "$ch" == "#" && $inq -eq 0 ]]; then break; fi
-      raw_clean="${raw_clean}${ch}"
-    done
-    clean="${raw_clean#"${raw_clean%%[![:space:]]*}"}"
-    clean="${clean%"${clean##*[![:space:]]}"}"
-    [[ -n "$clean" ]] || continue
-    if [[ "$clean" =~ ^pipeline:[[:space:]]+ && -z "$name" ]]; then
-      name=$(sed 's/^pipeline:[[:space:]]*//' <<< "$clean" | xargs)
-      [[ -z "$FLOW_TMP_NAME" ]] || return 2
-      FLOW_TMP_NAME="$name"
-    elif [[ "$clean" =~ ^steps: ]]; then
-      in_steps=1
-    elif [[ $in_steps -eq 1 && ("${line:0:1}" == " " || "${line:0:1}" == $'\t') ]]; then
-      local from_label="${clean%%[[:space:]-]*}"
-      from_label=$(echo "$from_label" | xargs)
-      local rem="${clean#*->}"; rem=$(echo "$rem" | xargs)
-      local to_label="${rem%%[[:space:]]*}"
-      rem="${rem#"$to_label"}"; rem=$(echo "$rem" | xargs)
-      local prompt="$rem"
-      if [[ "${prompt:0:1}" == '"' ]]; then prompt="${prompt:1}"; prompt="${prompt%\"}"; fi
-      FLOW_TMP_FROM+=("$from_label")
-      FLOW_TMP_TO+=("$to_label")
-      FLOW_TMP_PROMPT+=("$prompt")
-      (( FLOW_TMP_COUNT++ ))
-    fi
-  done < "$file"
-  [[ -n "$FLOW_TMP_NAME" ]] || return 2
-}
-
 cmd_flow_step() {
   require_tmux
   [[ -n "${TMUX_PANE:-}" ]] || die "not running inside a tmux pane (flow step must be called from an agent pane)"
@@ -648,7 +669,7 @@ cmd_flow_step() {
   [[ -n "$session" ]] || die "cannot determine session"
 
   local ctx_file state_file
-  ctx_file=$(ls "${TMPDIR:-/tmp}"/tmux-bridge-flow-"${session}"-*.ctx 2>/dev/null | head -1 || true)
+  ctx_file=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name "tmux-bridge-flow-${session}-*.ctx" 2>/dev/null | head -1 || true)
 
   if [[ -z "$ctx_file" ]]; then
     # Auto-start: read .smux from the session's project root
@@ -657,31 +678,63 @@ cmd_flow_step() {
     [[ -n "$project" ]] || die "session '$session' is not smux-managed (@smux_project not set). Cannot auto-start pipeline."
     [[ -f "$project/.smux" ]] || die "no .smux found at $project/.smux"
 
-    flow_parse_smux "$project/.smux"
-    [[ -n "$FLOW_TMP_NAME" && $FLOW_TMP_COUNT -gt 0 ]] || die "no pipeline defined in $project/.smux"
+    # Resolve smux CLI and parse pipeline via TSV
+    if ! resolve_smux; then
+      die "cannot find smux CLI to parse pipeline. Set SMUX_CLI=/path/to/smux or run 'smux install' to install smux in PATH."
+    fi
+    local smux_bin="$RESOLVED_SMUX" tsv_out tsv_rc=0
+    tsv_out=$("$smux_bin" parse-pipeline "$project/.smux" 2>/dev/null) || tsv_rc=$?
+    [[ $tsv_rc -eq 0 && -n "$tsv_out" ]] || die "failed to parse $project/.smux via smux parse-pipeline. Check your .smux file: smux init"
+
+    # Parse TSV output into SMUX_FLOW_TMP_* arrays
+    SMUX_FLOW_TMP_NAME=""; SMUX_FLOW_TMP_FROM=(); SMUX_FLOW_TMP_TO=(); SMUX_FLOW_TMP_PROMPT=(); SMUX_FLOW_TMP_COUNT=0
+    while IFS= read -r tsv_line; do
+      local kind; kind=$(printf '%s' "$tsv_line" | cut -f1)
+      case "$kind" in
+        pipeline)
+          local name_b64 decoded_name
+          name_b64=$(printf '%s' "$tsv_line" | cut -f2)
+          decoded_name=$(printf '%s' "$name_b64" | b64_decode) || die "failed to decode pipeline name from smux parse-pipeline output"
+          [[ -n "$decoded_name" ]] || die "pipeline name is empty in $project/.smux"
+          SMUX_FLOW_TMP_NAME="$decoded_name"
+          ;;
+        step)
+          local from to prompt_b64 decoded_prompt
+          from=$(printf '%s' "$tsv_line" | cut -f3)
+          to=$(printf '%s' "$tsv_line" | cut -f4)
+          prompt_b64=$(printf '%s' "$tsv_line" | cut -f5)
+          decoded_prompt=$(printf '%s' "$prompt_b64" | b64_decode) || die "failed to decode step prompt from smux parse-pipeline output"
+          SMUX_FLOW_TMP_FROM+=("$from")
+          SMUX_FLOW_TMP_TO+=("$to")
+          SMUX_FLOW_TMP_PROMPT+=("$decoded_prompt")
+          (( SMUX_FLOW_TMP_COUNT++ ))
+          ;;
+      esac
+    done <<< "$tsv_out"
+    [[ -n "$SMUX_FLOW_TMP_NAME" && $SMUX_FLOW_TMP_COUNT -gt 0 ]] || die "no pipeline defined in $project/.smux"
 
     # Resolve sender's label — must match step 0's "from"
     local sender_label
     sender_label=$(tmx display-message -t "$sender_pane" -p '#{@name}' 2>/dev/null || true)
     [[ -n "$sender_label" ]] || die "cannot determine sender label. Label your pane first: tmux-bridge name \$(tmux-bridge id) <label>"
-    [[ "$sender_label" == "${FLOW_TMP_FROM[0]}" ]] || die "pane label '$sender_label' does not match pipeline step 1 'from' label '${FLOW_TMP_FROM[0]}'. Are you the first agent in the pipeline?"
+    [[ "$sender_label" == "${SMUX_FLOW_TMP_FROM[0]}" ]] || die "pane label '$sender_label' does not match pipeline step 1 'from' label '${SMUX_FLOW_TMP_FROM[0]}'. Are you the first agent in the pipeline?"
 
-    ctx_file="${TMPDIR:-/tmp}/tmux-bridge-flow-${session}-${FLOW_TMP_NAME}.ctx"
+    ctx_file="${TMPDIR:-/tmp}/tmux-bridge-flow-${session}-${SMUX_FLOW_TMP_NAME}.ctx"
     state_file="${ctx_file%.ctx}"
     {
       echo "session=$session"
-      echo "name=$FLOW_TMP_NAME"
-      echo "steps=$FLOW_TMP_COUNT"
+      echo "name=$SMUX_FLOW_TMP_NAME"
+      echo "steps=$SMUX_FLOW_TMP_COUNT"
       local i pane_target
-      for (( i=0; i<FLOW_TMP_COUNT; i++ )); do
-        pane_target=$(tmx list-panes -a -F '#{pane_id} #{@name}' 2>/dev/null | grep " ${FLOW_TMP_TO[$i]}$" | head -1 | awk '{print $1}')
-        [[ -n "$pane_target" ]] || die "no pane found with label '${FLOW_TMP_TO[$i]}' needed for pipeline step $((i+1))"
-        echo "step_${i}=${FLOW_TMP_FROM[$i]}|${FLOW_TMP_TO[$i]}|${pane_target}|${FLOW_TMP_PROMPT[$i]}"
+      for (( i=0; i<SMUX_FLOW_TMP_COUNT; i++ )); do
+        pane_target=$(tmx list-panes -a -F '#{pane_id} #{@name}' 2>/dev/null | grep " ${SMUX_FLOW_TMP_TO[$i]}$" | head -1 | awk '{print $1}')
+        [[ -n "$pane_target" ]] || die "no pane found with label '${SMUX_FLOW_TMP_TO[$i]}' needed for pipeline step $((i+1))"
+        echo "step_${i}=${SMUX_FLOW_TMP_FROM[$i]}|${SMUX_FLOW_TMP_TO[$i]}|${pane_target}|${SMUX_FLOW_TMP_PROMPT[$i]}"
       done
     } > "$ctx_file"
     echo "0" > "$state_file"
 
-    echo "[flow: ${FLOW_TMP_NAME}] auto-started from .smux (${FLOW_TMP_COUNT} steps)"
+    echo "[flow: ${SMUX_FLOW_TMP_NAME}] auto-started from .smux (${SMUX_FLOW_TMP_COUNT} steps)"
   else
     state_file="${ctx_file%.ctx}"
   fi
@@ -698,6 +751,7 @@ cmd_flow_step() {
   fi
 
   # Route current step to the next agent
+  # shellcheck disable=SC2034
   local step_info next_from next_to next_pane next_prompt
   step_info=$(grep "^step_${step_idx}=" "$ctx_file" | cut -d= -f2-)
   [[ -n "$step_info" ]] || die "step $step_idx not found in pipeline context"

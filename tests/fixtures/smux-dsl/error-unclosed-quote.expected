@@ -1,0 +1,1 @@
+error	Unclosed quote in .smux layout: a "unclosed. Fix the quote, then run 'smux start --dry-run' to verify.

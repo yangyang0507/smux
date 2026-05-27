@@ -1,0 +1,1 @@
+error	Invalid label 'bad-label!'. Labels must match [A-Za-z0-9_.-]+. Use a label like 'test-runner npm test'.
