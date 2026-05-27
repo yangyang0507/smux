@@ -249,7 +249,7 @@ tmux-bridge lets AI agents (or any process) talk to each other across tmux panes
 
 | Command | What it does |
 |---------|-------------|
-| `tmux-bridge list` | Show all panes with label, process, and location |
+| `tmux-bridge list [--all\|-a]` | Show project-scoped panes (--all for global) |
 | `tmux-bridge read <target> [n]` | Read last n lines from a pane (default 50) |
 | `tmux-bridge type <target> <text>` | Type text into a pane (no Enter pressed) |
 | `tmux-bridge message <target> <text>` | Type a labeled message with sender info. Use `--enter` to auto-submit |
@@ -257,7 +257,7 @@ tmux-bridge lets AI agents (or any process) talk to each other across tmux panes
 | `tmux-bridge keys <target> <key>` | Send a special key (Enter, Escape, C-c, etc.) |
 | `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt |
 | `tmux-bridge name <target> <label>` | Label a pane for easy addressing |
-| `tmux-bridge resolve <label>` | Find a pane by label |
+| `tmux-bridge resolve [--all\|-a] <label>` | Find a pane by label (project-scoped by default) |
 | `tmux-bridge id` | Print current pane's ID |
 
 ### Read Guard
@@ -570,7 +570,7 @@ Completions cover: subcommands, pane labels (`tmux-bridge type <tab>`), session 
 
 | Command | Action |
 |---------|--------|
-| `tmux-bridge list` | List all panes |
+| `tmux-bridge list` | List project-scoped panes |
 | `tmux-bridge read <t> [n]` | Read n lines |
 | `tmux-bridge message <t> [--enter] <text>` | Send labeled message |
 | `tmux-bridge type <t> <text>` | Type text |

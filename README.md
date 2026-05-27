@@ -114,7 +114,7 @@ A CLI for cross-pane communication. Any tool that can run bash can use it — Cl
 
 | Command | Description |
 |---|---|
-| `tmux-bridge list` | Show all panes with target, process, label |
+| `tmux-bridge list [--all\|-a]` | Show project-scoped panes (--all for global) |
 | `tmux-bridge read <target> [lines]` | Read last N lines from a pane |
 | `tmux-bridge type <target> <text>` | Type text into a pane (no Enter) |
 | `tmux-bridge message <target> <text>` | Type a labeled cross-pane message (use `--enter` to auto-submit) |
@@ -123,7 +123,7 @@ A CLI for cross-pane communication. Any tool that can run bash can use it — Cl
 | `tmux-bridge flow step` | Submit current pipeline step and route to next agent |
 | `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt |
 | `tmux-bridge name <target> <label>` | Label a pane for easy addressing |
-| `tmux-bridge resolve <label>` | Look up a pane by label |
+| `tmux-bridge resolve [--all\|-a] <label>` | Look up a pane by label (project-scoped by default) |
 | `tmux-bridge id` | Print this pane's ID |
 
 See the [smux skill](skills/smux/SKILL.md) for full documentation on agent-to-agent workflows.

@@ -111,7 +111,7 @@ git diff | tmux-bridge file codex --stdin --name review.diff
 
 | Command | Description | Example |
 |---|---|---|
-| `tmux-bridge list` | Show all panes with target, pid, command, size, label | `tmux-bridge list` |
+| `tmux-bridge list [--all\|-a]` | Show project-scoped panes (--all for global) | `tmux-bridge list` |
 | `tmux-bridge type <target> [flags] [text...]` | Type text without pressing Enter | `printf '%s' "$msg" \| tmux-bridge type codex --stdin` |
 | `tmux-bridge message <target> [flags] [text...]` | Type text with auto sender info and reply target | `printf '%s' "$msg" \| tmux-bridge message codex --stdin` |
 | `tmux-bridge file <target> [flags] <path>` | Stage file/stdin content and send the shared path | `tmux-bridge file codex ./diff.txt` |
@@ -119,14 +119,16 @@ git diff | tmux-bridge file codex --stdin --name review.diff
 | `tmux-bridge keys <target> <key>...` | Send special keys | `tmux-bridge keys codex Enter` |
 | `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt | `tmux-bridge wake codex` |
 | `tmux-bridge name <target> <label>` | Label a pane (visible in tmux border) | `tmux-bridge name %3 codex` |
-| `tmux-bridge resolve <label>` | Print pane target for a label | `tmux-bridge resolve codex` |
+| `tmux-bridge resolve [--all\|-a] <label>` | Print pane target for a label (project-scoped by default) | `tmux-bridge resolve codex` |
 | `tmux-bridge id` | Print this pane's ID | `tmux-bridge id` |
 
 ## Target Resolution
 
 Targets can be:
 - **tmux native**: `session:window.pane` (e.g. `shared:0.1`), pane ID (`%3`), or window index (`0`)
-- **label**: Any string set via `tmux-bridge name` — resolved automatically
+- **label**: Any string set via `tmux-bridge name` — resolved automatically within the current project scope
+
+Labels are resolved within the current project scope by default. Use `resolve --all <label>` to find a label globally, then use the explicit `%pane` ID for cross-project operations.
 
 This means `tmux-bridge type codex 'hello'` works directly if the pane was labeled `codex`.
 
@@ -253,7 +255,8 @@ tmux-bridge name "$(tmux-bridge id)" claude
 ### Step 2: Discover other panes
 
 ```bash
-tmux-bridge list
+tmux-bridge list            # panes in current project
+tmux-bridge list --all      # all panes across all sessions
 ```
 
 ### Step 3: Read, message, read, Enter

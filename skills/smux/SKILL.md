@@ -121,7 +121,7 @@ error: must read the pane before interacting. Run: tmux-bridge read codex
 
 | Command | Description | Example |
 |---|---|---|
-| `tmux-bridge list` | Show all panes with target, pid, command, size, label | `tmux-bridge list` |
+| `tmux-bridge list [--all\|-a]` | Show project-scoped panes (--all for global) | `tmux-bridge list` |
 | `tmux-bridge type <target> [flags] [text...]` | Type text without pressing Enter | `printf '%s' "$msg" \| tmux-bridge type codex --stdin` |
 | `tmux-bridge message <target> [--enter] [flags] [text...]` | Type text with auto sender info and reply target. `--enter` auto-submits after typing (no separate `keys Enter` needed) | `printf '%s' "$msg" \| tmux-bridge message codex --stdin --enter` |
 | `tmux-bridge file <target> [flags] <path>` | Stage file/stdin content and send the shared path | `tmux-bridge file codex ./diff.txt` |
@@ -129,7 +129,7 @@ error: must read the pane before interacting. Run: tmux-bridge read codex
 | `tmux-bridge keys <target> <key>...` | Send special keys | `tmux-bridge keys codex Enter` |
 | `tmux-bridge wake <target>` | Explicitly send Escape to leave tmux mode/prompt | `tmux-bridge wake codex` |
 | `tmux-bridge name <target> <label>` | Label a pane (visible in tmux border) | `tmux-bridge name %3 codex` |
-| `tmux-bridge resolve <label>` | Print pane target for a label | `tmux-bridge resolve codex` |
+| `tmux-bridge resolve [--all\|-a] <label>` | Print pane target for a label (project-scoped by default) | `tmux-bridge resolve codex` |
 | `tmux-bridge id` | Print this pane's ID | `tmux-bridge id` |
 
 ### Input Modes
@@ -188,7 +188,9 @@ printf '%s' 'Here is the review diff' | tmux-bridge message codex --stdin
 
 Targets can be:
 - **tmux native**: `session:window.pane` (e.g. `shared:0.1`), pane ID (`%3`), or window index (`0`)
-- **label**: Any string set via `tmux-bridge name` — resolved automatically
+- **label**: Any string set via `tmux-bridge name` — resolved automatically within the current project scope
+
+Labels are resolved within the current project scope by default. Use `resolve --all <label>` to find a label globally, then use the explicit `%pane` ID for cross-project operations.
 
 ### Read-Act-Read Cycle
 
