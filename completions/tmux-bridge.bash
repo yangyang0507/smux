@@ -60,4 +60,3 @@ _tmux_bridge_complete() {
 }
 
 complete -F _tmux_bridge_complete tmux-bridge
-mux-bridge
